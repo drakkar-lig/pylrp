@@ -3,6 +3,7 @@ import logging
 import click
 
 from lrp.daemon import daemon
+from lrp.sniffer import sniff
 
 
 @click.group()
@@ -17,6 +18,7 @@ def cli(verbose):
 
 
 cli.add_command(daemon)
+cli.add_command(sniff)
 
 if __name__ == "__main__":
     cli()
