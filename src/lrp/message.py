@@ -1,5 +1,6 @@
 import abc
 import enum
+import socket
 
 import lrp
 
@@ -13,6 +14,10 @@ class MessageType(enum.IntEnum):
     BRK = 6
     UPD = 7
     HELLO = 8
+
+    def __str__(self):
+        return "%s" % self._name_
+
 
 
 class Message(metaclass=abc.ABCMeta):
@@ -57,4 +62,31 @@ class DIO(Message):
         return super(DIO, self).dump() + self.metric_value.to_bytes(2, lrp.conf['endianess'])
 
     def __str__(self):
-        return "%s <metric_value=%s>" % (self.__class__.__name__, self.metric_value)
+        return "%s <metric_value=%d>" % (self.__class__.__name__, self.metric_value)
+
+
+@Message.record_message_type
+class RREP(Message):
+    message_type = MessageType.RREP
+
+    @classmethod
+    def parse(cls, flow):
+        source = socket.inet_ntoa(flow[1:5])
+        destination = socket.inet_ntoa(flow[5:9])
+        hops = int.from_bytes(flow[9:11], lrp.conf['endianess'])
+        return cls(source, destination, hops)
+
+    def __init__(self, source, destination, hops):
+        self.source = source
+        self.destination = destination
+        self.hops = hops
+
+    def dump(self):
+        result = b""
+        result += socket.inet_aton(self.source)
+        result += socket.inet_aton(self.destination)
+        result += self.hops.to_bytes(2, lrp.conf['endianess'])
+        return super(RREP, self).dump() + result
+
+    def __str__(self):
+        return "%s <source=%s destination=%s hops=%d>" % (self.message_type, self.source, self.destination, self.hops)

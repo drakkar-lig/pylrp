@@ -1,4 +1,5 @@
 import logging
+import select
 import socket
 import struct
 
@@ -6,6 +7,7 @@ import click
 import pyroute2
 
 import lrp
+from lrp.message import RREP, DIO
 
 
 class LrpProcess:
@@ -27,6 +29,7 @@ class LrpProcess:
         if own_metric is not None:
             self.own_metric = own_metric
         self._successors = {}
+        self.routing_table = {}
 
     def __enter__(self):
         with pyroute2.IPRoute() as ip:
@@ -48,52 +51,81 @@ class LrpProcess:
                                       struct.pack("=4s4s", multicast_address_as_bytes, iface_address_as_bytes))
         self.bdc_in_socket.bind((lrp.conf['service_multicast_address'], lrp.conf['service_port']))
 
+        self.logger.debug("Initialize unicast socket ([%s]:%d)", iface_address, lrp.conf['service_port'])
+        self.uni_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.uni_socket.bind((self.own_ip, lrp.conf['service_port']))
+
         with pyroute2.IPDB() as ipdb:
-            try:
-                default_route = ipdb.routes['default']
-                self.logger.info("Drop default route")  # should be set by the protocol itself
-                default_route.remove().commit()
-            except KeyError:
-                # No default route, ok.
-                pass
+            self.logger.debug("Flush all routes")
+            for route in ipdb.routes:
+                self.logger.debug("Drop a route towards %s" % route['dst'])
+                route.remove().commit()
 
         return self
 
-    def is_neighbor(self, address):
-        # Check if neighbor is declared.
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.logger.debug("Close service sockets")
+        self.bdc_out_socket.close()
+        self.bdc_in_socket.close()
+        self.uni_socket.close()
+
+    def ensure_is_neighbor(self, address):
+        """Check if neighbor is declared. If it is not, it is added as neighbor."""
         address += "/32"
         with pyroute2.IPDB() as ipdb:
             if address not in ipdb.routes:
-                # import pdb; pdb.set_trace()
                 self.logger.info("Adding %s as neighbor" % address)
                 ipdb.routes.add(dst=address, oif=self.idx,
                                 scope=pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK'],
                                 proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC']) \
                     .commit()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.logger.debug("Close service sockets")
-        self.bdc_out_socket.close()
-        self.bdc_in_socket.close()
+    def is_neighbor(self, address):
+        """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`, the neighbor is not added if it
+        was not known."""
+        address += "/32"
+        with pyroute2.IPDB() as ipdb:
+            try:
+                return ipdb.routes[address]['scope'] == pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK']
+            except KeyError:
+                # address is unknown, it is certainly not a neighbor
+                return False
+
+    def get_a_successor(self):
+        try:
+            with pyroute2.IPRoute() as ipr:
+                return ipr.get_default_routes()[0].get_attr('RTA_GATEWAY')
+        except IndexError:
+            # No default route
+            return None
+
+    def get_a_nexthop(self, destination):
+        try:
+            with pyroute2.IPRoute() as ipr:
+                return ipr.route('get', dst=destination)[0].get_attr('RTA_GATEWAY')
+        except pyroute2.netlink.exceptions.NetlinkError:
+            # No route towards destination
+            return None
 
     def wait_event(self):
+        self.broadcast_message(DIO(self.own_metric))
         while True:
-            data, (address, port) = self.bdc_in_socket.recvfrom(16)
-            if address == self.own_ip:
+            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket], [], [], None)
+            data, (sender, _) = rr[0].recvfrom(16)
+            if sender == self.own_ip:
                 self.logger.debug("Skip a message from ourselves")
                 continue
             msg = lrp.message.Message.parse(data)
-            self.logger.info("Received %s from %s", msg, address)
+            self.logger.info("Received %s from %s", msg, sender)
+            self.ensure_is_neighbor(sender)
 
-            self.is_neighbor(address)
-
-            route_cost = msg.metric_value + 1
-            if msg.message_type == lrp.message.MessageType.DIO:
+            if isinstance(msg, DIO):
+                route_cost = msg.metric_value + 1
                 if self.own_metric < route_cost:
                     self.logger.debug("Do not use DIO: route is too bad")
                     if self.own_metric + 2 < route_cost:
                         self.logger.info("Neighbor may be interested by our DIO")
-                        self.send_dio()
+                        self.broadcast_message(DIO(self.own_metric))
                 else:
                     with pyroute2.IPDB() as ipdb:
                         try:
@@ -104,7 +136,7 @@ class LrpProcess:
                             # No default route, ok.
                             pass
 
-                        self._successors[address] = route_cost
+                        self._successors[sender] = route_cost
 
                         if self.own_metric > route_cost:
                             self.logger.info("Update our metric to %d", route_cost)
@@ -118,16 +150,70 @@ class LrpProcess:
                                     del self._successors[successor]
 
                             self.logger.debug("Inform neighbors that we have changed our metric")
-                            self.send_dio()
+                            self.broadcast_message(DIO(self.own_metric))
 
-                        if not len(self._successors) == 0:
-                            ipdb.routes.add(dst="default", multipath=[{'gateway': key, 'hops': value} for key, value in
-                                                                      self._successors.items()]).commit()
+                        if len(self._successors) != 0:
+                            multipath = [{'gateway': key, 'hops': value} for key, value in self._successors.items()]
+                            ipdb.routes.add(dst="default", multipath=multipath).commit()
 
-    def send_dio(self):
-        dio = lrp.message.DIO(self.own_metric)
-        self.logger.info("Send a %s", dio)
-        self.bdc_out_socket.send(dio.dump())
+                        # TODO: we send RREP at each successor change. We should do that only sometimes.
+                        self.logger.info("Refresh host route")
+                        nexthop = self.get_a_successor()
+                        if nexthop is not None:
+                            self.send_msg(RREP(self.own_ip, "172.18.0.1", 0), destination=nexthop)
+                        else:
+                            self.logger.warning("Not sending RREP: no more successor")
+
+            elif isinstance(msg, RREP):
+                with pyroute2.IPDB() as ipdb:
+                    route_cost = msg.hops + 1
+
+                    if not self.is_neighbor(msg.source):
+                        try:
+                            with ipdb.routes[msg.source] as route:
+                                self.logger.debug("Drop the current route towards %s" % msg.source)
+                                route.remove()
+                        except KeyError:
+                            # No such route, ok.
+                            pass
+
+                        # Update own routing table
+                        try:
+                            self.routing_table[msg.source][sender] = route_cost
+                        except KeyError:
+                            self.routing_table[msg.source] = {sender: route_cost}
+
+                        # Recreate the route
+                        if len(self.routing_table[msg.source]) != 0:
+                            multipath = [{'gateway': key, 'hops': value} for key, value in
+                                         self.routing_table[msg.source].items()]
+                            self.logger.info("Updating routing table: next hops for %s are %r", msg.source,
+                                             self.routing_table[msg.source])
+                            ipdb.routes.add(dst=msg.source + "/32", multipath=multipath).commit()
+
+                    # Update RREP
+                    msg.hops = route_cost
+
+                    # Forward RREP
+                    if msg.destination == self.own_ip:
+                        self.logger.debug("RREP has reached its destination")
+                    else:
+                        nexthop = self.get_a_nexthop(msg.destination)
+                        if nexthop is not None:
+                            self.logger.info("Forward RREP farther")
+                            self.send_msg(msg, destination=nexthop)
+                        else:
+                            self.logger.info("Drop RREP: no route towards %s" % msg.destination)
+            else:
+                self.logger.warning("Received unknown message type: %d" % msg.message_type)
+
+    def send_msg(self, msg, destination):
+        self.logger.info("Send %s to %s" % (msg, destination))
+        self.uni_socket.sendto(msg.dump(), (destination, lrp.conf['service_port']))
+
+    def broadcast_message(self, msg):
+        self.logger.info("Send %s", msg)
+        self.bdc_out_socket.send(msg.dump())
 
 
 @click.command()
