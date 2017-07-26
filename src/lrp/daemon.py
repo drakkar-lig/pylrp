@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import logging
 import select
 import socket
@@ -225,3 +227,7 @@ class LrpProcess:
 def daemon(interface, metric):
     with LrpProcess(interface, metric) as lrp:
         lrp.wait_event()
+
+
+if __name__ == '__main__':
+    daemon()

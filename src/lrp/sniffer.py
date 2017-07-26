@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import click
 from scapy.all import IP, UDP, sniff
 
@@ -17,3 +19,7 @@ def sniff(interface: str):
             lrp.message.Message.parse(bytes(lrp_payload))))
 
     sniff(iface=interface, prn=dump, filter="udp port 6666", store=0)
+
+
+if __name__ == '__main__':
+    sniff()
