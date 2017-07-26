@@ -55,9 +55,10 @@ class LrpProcess:
         self.uni_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.uni_socket.bind((self.own_ip, lrp.conf['service_port']))
 
+        self.logger.debug("Flush all routes")
         with pyroute2.IPDB() as ipdb:
-            self.logger.debug("Flush all routes")
-            for route in ipdb.routes:
+            for key in ipdb.routes.keys():
+                route = ipdb.routes[key]
                 self.logger.debug("Drop a route towards %s" % route['dst'])
                 route.remove().commit()
 
