@@ -108,10 +108,99 @@ class LrpProcess:
             # No route towards destination
             return None
 
+    def handle_routing_msg(self, msg, sender):
+        if isinstance(msg, DIO):
+            route_cost = msg.metric_value + 1
+            if self.own_metric < route_cost:
+                self.logger.debug("Do not use DIO: route is too bad")
+                if self.own_metric + 2 < route_cost:
+                    self.logger.info("Neighbor may be interested by our DIO")
+                    self.broadcast_message(DIO(self.own_metric))
+            else:
+                with pyroute2.IPDB() as ipdb:
+                    try:
+                        with ipdb.routes['default'] as default_route:
+                            self.logger.debug("Drop current default route")
+                            default_route.remove()
+                    except KeyError:
+                        # No default route, ok.
+                        pass
+
+                    self._successors[sender] = route_cost
+
+                    if self.own_metric > route_cost:
+                        self.logger.info("Update our metric to %d", route_cost)
+                        self.own_metric = route_cost
+
+                        self.logger.debug("Check if old successors are still usable")
+                        for successor in list(self._successors.keys()):
+                            if self._successors[successor] > self.own_metric:
+                                self.logger.info("Drop successor '%s': too high metric (was %d)", successor,
+                                                 self._successors[successor])
+                                del self._successors[successor]
+
+                        self.logger.debug("Inform neighbors that we have changed our metric")
+                        self.broadcast_message(DIO(self.own_metric))
+
+                    if len(self._successors) != 0:
+                        multipath = [{'gateway': key, 'hops': value} for key, value in self._successors.items()]
+                        ipdb.routes.add(dst="default", multipath=multipath).commit()
+
+                    # TODO: we send RREP at each successor change. We should do that only sometimes.
+                    self.logger.info("Refresh host route")
+                    nexthop = self.get_a_successor()
+                    if nexthop is not None:
+                        self.send_msg(RREP(self.own_ip, "172.18.0.1", 0), destination=nexthop)
+                    else:
+                        self.logger.warning("Not sending RREP: no more successor")
+
+        elif isinstance(msg, RREP):
+            with pyroute2.IPDB() as ipdb:
+                route_cost = msg.hops + 1
+
+                if not self.is_neighbor(msg.source):
+                    try:
+                        with ipdb.routes[msg.source] as route:
+                            self.logger.debug("Drop the current route towards %s" % msg.source)
+                            route.remove()
+                    except KeyError:
+                        # No such route, ok.
+                        pass
+
+                    # Update own routing table
+                    try:
+                        self.routing_table[msg.source][sender] = route_cost
+                    except KeyError:
+                        self.routing_table[msg.source] = {sender: route_cost}
+
+                    # Recreate the route
+                    if len(self.routing_table[msg.source]) != 0:
+                        multipath = [{'gateway': key, 'hops': value} for key, value in
+                                     self.routing_table[msg.source].items()]
+                        self.logger.info("Updating routing table: next hops for %s are %r", msg.source,
+                                         self.routing_table[msg.source])
+                        ipdb.routes.add(dst=msg.source + "/32", multipath=multipath).commit()
+
+                # Update RREP
+                msg.hops = route_cost
+
+                # Forward RREP
+                if msg.destination == self.own_ip:
+                    self.logger.debug("RREP has reached its destination")
+                else:
+                    nexthop = self.get_a_nexthop(msg.destination)
+                    if nexthop is not None:
+                        self.logger.info("Forward RREP farther")
+                        self.send_msg(msg, destination=nexthop)
+                    else:
+                        self.logger.info("Drop RREP: no route towards %s" % msg.destination)
+        else:
+            self.logger.warning("Received unknown message type: %d" % msg.message_type)
+
     def wait_event(self):
         self.broadcast_message(DIO(self.own_metric))
         while True:
-            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket], [], [], None)
+            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket], [], [])
             data, (sender, _) = rr[0].recvfrom(16)
             if sender == self.own_ip:
                 self.logger.debug("Skip a message from ourselves")
@@ -119,94 +208,7 @@ class LrpProcess:
             msg = lrp.message.Message.parse(data)
             self.logger.info("Received %s from %s", msg, sender)
             self.ensure_is_neighbor(sender)
-
-            if isinstance(msg, DIO):
-                route_cost = msg.metric_value + 1
-                if self.own_metric < route_cost:
-                    self.logger.debug("Do not use DIO: route is too bad")
-                    if self.own_metric + 2 < route_cost:
-                        self.logger.info("Neighbor may be interested by our DIO")
-                        self.broadcast_message(DIO(self.own_metric))
-                else:
-                    with pyroute2.IPDB() as ipdb:
-                        try:
-                            with ipdb.routes['default'] as default_route:
-                                self.logger.debug("Drop current default route")
-                                default_route.remove()
-                        except KeyError:
-                            # No default route, ok.
-                            pass
-
-                        self._successors[sender] = route_cost
-
-                        if self.own_metric > route_cost:
-                            self.logger.info("Update our metric to %d", route_cost)
-                            self.own_metric = route_cost
-
-                            self.logger.debug("Check if old successors are still usable")
-                            for successor in list(self._successors.keys()):
-                                if self._successors[successor] > self.own_metric:
-                                    self.logger.info("Drop successor '%s': too high metric (was %d)", successor,
-                                                     self._successors[successor])
-                                    del self._successors[successor]
-
-                            self.logger.debug("Inform neighbors that we have changed our metric")
-                            self.broadcast_message(DIO(self.own_metric))
-
-                        if len(self._successors) != 0:
-                            multipath = [{'gateway': key, 'hops': value} for key, value in self._successors.items()]
-                            ipdb.routes.add(dst="default", multipath=multipath).commit()
-
-                        # TODO: we send RREP at each successor change. We should do that only sometimes.
-                        self.logger.info("Refresh host route")
-                        nexthop = self.get_a_successor()
-                        if nexthop is not None:
-                            self.send_msg(RREP(self.own_ip, "172.18.0.1", 0), destination=nexthop)
-                        else:
-                            self.logger.warning("Not sending RREP: no more successor")
-
-            elif isinstance(msg, RREP):
-                with pyroute2.IPDB() as ipdb:
-                    route_cost = msg.hops + 1
-
-                    if not self.is_neighbor(msg.source):
-                        try:
-                            with ipdb.routes[msg.source] as route:
-                                self.logger.debug("Drop the current route towards %s" % msg.source)
-                                route.remove()
-                        except KeyError:
-                            # No such route, ok.
-                            pass
-
-                        # Update own routing table
-                        try:
-                            self.routing_table[msg.source][sender] = route_cost
-                        except KeyError:
-                            self.routing_table[msg.source] = {sender: route_cost}
-
-                        # Recreate the route
-                        if len(self.routing_table[msg.source]) != 0:
-                            multipath = [{'gateway': key, 'hops': value} for key, value in
-                                         self.routing_table[msg.source].items()]
-                            self.logger.info("Updating routing table: next hops for %s are %r", msg.source,
-                                             self.routing_table[msg.source])
-                            ipdb.routes.add(dst=msg.source + "/32", multipath=multipath).commit()
-
-                    # Update RREP
-                    msg.hops = route_cost
-
-                    # Forward RREP
-                    if msg.destination == self.own_ip:
-                        self.logger.debug("RREP has reached its destination")
-                    else:
-                        nexthop = self.get_a_nexthop(msg.destination)
-                        if nexthop is not None:
-                            self.logger.info("Forward RREP farther")
-                            self.send_msg(msg, destination=nexthop)
-                        else:
-                            self.logger.info("Drop RREP: no route towards %s" % msg.destination)
-            else:
-                self.logger.warning("Received unknown message type: %d" % msg.message_type)
+            self.handle_routing_msg(msg, sender)
 
     def send_msg(self, msg, destination):
         self.logger.info("Send %s to %s" % (msg, destination))
