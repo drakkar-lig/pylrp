@@ -19,6 +19,8 @@ class RoutesManager:
         self.routes = {}
         self.interface = interface
 
+        self._flush_routes()
+
     def ensure_is_neighbor(self, address):
         """Check if neighbor is declared. If it is not, add it as neighbor."""
         address += "/32"
@@ -128,6 +130,14 @@ class RoutesManager:
             # Synchronize netlink
             self._update_route(destination)
 
+    def _flush_routes(self):
+        self.logger.debug("Flush all routes")
+        with pyroute2.IPDB() as ipdb:
+            for key in ipdb.routes.keys():
+                route = ipdb.routes[key]
+                self.logger.debug("Drop a route towards %s" % route['dst'])
+                route.remove().commit()
+
 
 class LrpProcess:
     logger = logging.getLogger("LRP")
@@ -173,13 +183,6 @@ class LrpProcess:
         self.logger.debug("Initialize unicast socket ([%s]:%d)", iface_address, lrp.conf['service_port'])
         self.uni_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.uni_socket.bind((self.own_ip, lrp.conf['service_port']))
-
-        self.logger.debug("Flush all routes")
-        with pyroute2.IPDB() as ipdb:
-            for key in ipdb.routes.keys():
-                route = ipdb.routes[key]
-                self.logger.debug("Drop a route towards %s" % route['dst'])
-                route.remove().commit()
 
         return self
 
