@@ -6,6 +6,7 @@ import socket
 import struct
 
 import click
+import iptc
 import pyroute2
 
 import lrp
@@ -15,11 +16,17 @@ from lrp.message import RREP, DIO
 class RoutesManager:
     logger = logging.getLogger("LRP")
 
+    non_routable_mark = non_routable_table = 21
+
     def __init__(self, interface):
         self.routes = {}
         self.interface = interface
 
-        self._flush_routes()
+        self._hr_destinations = []
+        self._predecessors = []
+
+        self._netfilter_init()
+        self._netlink_init()
 
     def ensure_is_neighbor(self, address):
         """Check if neighbor is declared. If it is not, add it as neighbor."""
@@ -67,7 +74,99 @@ class RoutesManager:
             # No route towards the destination
             return None
 
-    def _update_route(self, destination):
+    def get_mac(self, next_hop):
+        with pyroute2.IPRoute() as ipr:
+            return ipr.neigh("dump", dst=next_hop)[0].get_attr('NDA_LLADDR')
+
+    def add_route(self, destination, next_hop, metric):
+        """Add a route to `destination`, through `next_hop`, with cost `metric`. If a route with the same
+        destination/next_hop already exists, it is erased by the new one. If a route with the same destination but with
+        another next_hop exists, they coexists, with their own metric. If `destination` is None, it is the default
+        route."""
+
+        # Get real destination
+        if destination is None or destination == "0.0.0.0/0":
+            destination = "default"
+        elif '/' not in destination:
+            # Suppose it is a host route
+            destination += "/32"
+
+        # Update the routing table
+        try:
+            self.routes[destination][next_hop] = metric
+        except KeyError:
+            # Destination was unknown
+            self.routes[destination] = {next_hop: metric}
+            self._netfilter_is_destination(destination)
+
+        # Synchronize netlink and netfilter
+        self._netlink_update_route(destination)
+        if destination != "default":
+            self._netfilter_is_predecessor(next_hop)
+
+    def filter_out(self, destination, max_metric: int=None):
+        """Filter out some routes, according to some constraints."""
+
+        if destination is None:
+            destination = "default"
+
+        route = self.routes[destination]
+        changed = False
+        for next_hop in list(self.routes[destination].keys()):
+            if route[next_hop] > max_metric:
+                self.logger.info("Drop successor '%s': no more valid (metric was %d)", next_hop, route[next_hop])
+                changed = True
+                del route[next_hop]
+
+        if changed:
+            # Synchronize netlink
+            self._update_route(destination)
+
+    def _netfilter_init(self):
+        self.logger.debug("Flush firewall rules")
+        mangle_prerouting = iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING")
+        mangle_prerouting.flush()
+
+        self.logger.debug("Add firewall rule for non-routable packets")
+        rule = iptc.Rule()
+        rule.target = iptc.Target(rule, "MARK")
+        rule.target.set_mark = "%#x" % self.non_routable_mark
+        mangle_prerouting.append_rule(rule)
+
+    def _netfilter_is_predecessor(self, next_hop):
+        if next_hop not in self._predecessors:
+            rule = iptc.Rule()
+            match = iptc.Match(rule, "mac")
+            match.mac_source = self.get_mac(next_hop)
+            rule.add_match(match)
+            rule.target = iptc.Target(rule, "ACCEPT")
+            iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING").insert_rule(rule)
+
+    def _netfilter_is_destination(self, destination):
+        if destination != "default" and destination not in self._hr_destinations:
+            rule = iptc.Rule()
+            rule.dst = destination
+            rule.target = iptc.Target(rule, "ACCEPT")
+            iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING").insert_rule(rule)
+
+    def _netlink_init(self):
+        with pyroute2.IPDB() as ipdb:
+            self.logger.debug("Flush all routes & rules")
+            for key in ipdb.routes.keys():
+                route = ipdb.routes[key]
+                self.logger.debug("Drop a route towards %s" % route['dst'])
+                route.remove().commit()
+            for key in list(ipdb.rules.keys()):
+                if key.fwmark == self.non_routable_mark and key.fwmask == 0xffffffff:
+                    self.logger.debug("Drop a rule matching the non routable mark")
+                    ipdb.rules[key].remove().commit()
+
+            self.logger.debug("Set route & rule for non-routable packets")
+            ipdb.rules.add(fwmark=self.non_routable_mark, fwmask=0xffffffff, table=self.non_routable_table).commit()
+            # TODO: self.non_routable_interface is not now implemented, we cannot use it now.
+            #ipdb.routes.add(dst="default", table=self.non_routable_table, index=self.non_routable_iface).commit()
+
+    def _netlink_update_route(self, destination):
         """Must be called whenever self.routes[destination] has changed. Keep netlink synchronized with this change."""
 
         # If the neighbor is 'on link', (i.e. directly accessible), we do not need to change anything, the best choice
@@ -89,54 +188,6 @@ class RoutesManager:
                 multipath = [{'gateway': key, 'hops': value} for key, value in self.routes[destination].items()]
                 self.logger.info("Updating routing table: next hops for '%s' are %r", destination, self.routes[destination])
                 ipdb.routes.add(dst=destination, multipath=multipath).commit()
-
-    def add_route(self, destination, next_hop, metric):
-        """Add a route to `destination`, through `next_hop`, with cost `metric`. If a route with the same
-        destination/next_hop already exists, it is erased by the new one. If a route with the same destination but with
-        another next_hop exists, they coexists, with their own metric. If `destination` is None, it is the default
-        route."""
-
-        # Get real destination
-        if destination is None:
-            destination = "default"
-        elif '/' not in destination:
-            # Suppose it is a host route
-            destination += "/32"
-
-        # Update the routing table
-        try:
-            self.routes[destination][next_hop] = metric
-        except KeyError:
-            self.routes[destination] = {next_hop: metric}
-
-        # Synchronize netlink
-        self._update_route(destination)
-
-    def filter_out(self, destination, max_metric: int=None):
-        """Filter out some routes, according to some constraints."""
-
-        if destination is None:
-            destination = "default"
-
-        route = self.routes[destination]
-        changed = False
-        for next_hop in list(self.routes[destination].keys()):
-            if route[next_hop] > max_metric:
-                self.logger.info("Drop successor '%s': no more valid (metric was %d)", next_hop, route[next_hop])
-                changed = True
-                del route[next_hop]
-
-        if changed:
-            # Synchronize netlink
-            self._update_route(destination)
-
-    def _flush_routes(self):
-        self.logger.debug("Flush all routes")
-        with pyroute2.IPDB() as ipdb:
-            for key in ipdb.routes.keys():
-                route = ipdb.routes[key]
-                self.logger.debug("Drop a route towards %s" % route['dst'])
-                route.remove().commit()
 
 
 class LrpProcess:
