@@ -12,6 +12,123 @@ import lrp
 from lrp.message import RREP, DIO
 
 
+class RoutesManager:
+    logger = logging.getLogger("LRP")
+
+    def __init__(self, interface):
+        self.routes = {}
+        self.interface = interface
+
+    def ensure_is_neighbor(self, address):
+        """Check if neighbor is declared. If it is not, add it as neighbor."""
+        address += "/32"
+        with pyroute2.IPDB() as ipdb:
+            if address not in ipdb.routes:
+                self.logger.info("Adding %s as neighbor" % address)
+                ipdb.routes.add(dst=address, oif=self.interface,
+                                scope=pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK'],
+                                proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC']) \
+                    .commit()
+
+    def is_neighbor(self, address) -> bool:
+        """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`, the neighbor is not added if it
+        was not known."""
+
+        if '/' not in address:
+            # Suppose it is a host route
+            address += "/32"
+
+        try:
+            with pyroute2.IPDB() as ipdb:
+                return ipdb.routes[address]['scope'] == pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK']
+        except KeyError:
+            # address is unknown, it is certainly not a neighbor
+            return False
+
+    def is_successor(self, nexthop):
+        try:
+            return nexthop in self.routes['default']
+        except KeyError:
+            # No default route -> no successor at all
+            return False
+
+    def get_nexthop(self, destination=None):
+        """Get a next_hop towards a `destination`. If `destination` is None, get a successor."""
+        try:
+            with pyroute2.IPRoute() as ipr:
+                if destination is None:
+                    route = ipr.get_default_routes()[0]
+                else:
+                    route = ipr.route('get', dst=destination)[0]
+            return route.get_attr('RTA_GATEWAY')
+        except pyroute2.NetlinkError:
+            # No route towards the destination
+            return None
+
+    def _update_route(self, destination):
+        """Must be called whenever self.routes[destination] has changed. Keep netlink synchronized with this change."""
+
+        # If the neighbor is 'on link', (i.e. directly accessible), we do not need to change anything, the best choice
+        # will always be to send the packet to itself.
+        if self.is_neighbor(destination):
+            return
+
+        # Drop route if it exists
+        with pyroute2.IPDB() as ipdb:
+            try:
+                self.logger.debug("Drop old route towards '%s'", destination)
+                ipdb.routes[destination].remove().commit()
+            except KeyError:
+                # No such route, ok.
+                pass
+
+            # Recreate the route
+            if len(self.routes[destination]) != 0:
+                multipath = [{'gateway': key, 'hops': value} for key, value in self.routes[destination].items()]
+                self.logger.info("Updating routing table: next hops for '%s' are %r", destination, self.routes[destination])
+                ipdb.routes.add(dst=destination, multipath=multipath).commit()
+
+    def add_route(self, destination, next_hop, metric):
+        """Add a route to `destination`, through `next_hop`, with cost `metric`. If a route with the same
+        destination/next_hop already exists, it is erased by the new one. If a route with the same destination but with
+        another next_hop exists, they coexists, with their own metric. If `destination` is None, it is the default
+        route."""
+
+        # Get real destination
+        if destination is None:
+            destination = "default"
+        elif '/' not in destination:
+            # Suppose it is a host route
+            destination += "/32"
+
+        # Update the routing table
+        try:
+            self.routes[destination][next_hop] = metric
+        except KeyError:
+            self.routes[destination] = {next_hop: metric}
+
+        # Synchronize netlink
+        self._update_route(destination)
+
+    def filter_out(self, destination, max_metric: int=None):
+        """Filter out some routes, according to some constraints."""
+
+        if destination is None:
+            destination = "default"
+
+        route = self.routes[destination]
+        changed = False
+        for next_hop in list(self.routes[destination].keys()):
+            if route[next_hop] > max_metric:
+                self.logger.info("Drop successor '%s': no more valid (metric was %d)", next_hop, route[next_hop])
+                changed = True
+                del route[next_hop]
+
+        if changed:
+            # Synchronize netlink
+            self._update_route(destination)
+
+
 class LrpProcess:
     logger = logging.getLogger("LRP")
 
@@ -31,7 +148,7 @@ class LrpProcess:
         if own_metric is not None:
             self.own_metric = own_metric
         self._successors = {}
-        self.routing_table = {}
+        self.route_manager = RoutesManager(interface=self.idx)
 
     def __enter__(self):
         with pyroute2.IPRoute() as ip:
@@ -72,130 +189,63 @@ class LrpProcess:
         self.bdc_in_socket.close()
         self.uni_socket.close()
 
-    def ensure_is_neighbor(self, address):
-        """Check if neighbor is declared. If it is not, it is added as neighbor."""
-        address += "/32"
-        with pyroute2.IPDB() as ipdb:
-            if address not in ipdb.routes:
-                self.logger.info("Adding %s as neighbor" % address)
-                ipdb.routes.add(dst=address, oif=self.idx,
-                                scope=pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK'],
-                                proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC']) \
-                    .commit()
-
-    def is_neighbor(self, address):
-        """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`, the neighbor is not added if it
-        was not known."""
-        address += "/32"
-        with pyroute2.IPDB() as ipdb:
-            try:
-                return ipdb.routes[address]['scope'] == pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK']
-            except KeyError:
-                # address is unknown, it is certainly not a neighbor
-                return False
-
-    def get_a_successor(self):
-        try:
-            with pyroute2.IPRoute() as ipr:
-                return ipr.get_default_routes()[0].get_attr('RTA_GATEWAY')
-        except IndexError:
-            # No default route
-            return None
-
-    def get_a_nexthop(self, destination):
-        try:
-            with pyroute2.IPRoute() as ipr:
-                return ipr.route('get', dst=destination)[0].get_attr('RTA_GATEWAY')
-        except pyroute2.netlink.exceptions.NetlinkError:
-            # No route towards destination
-            return None
-
     def handle_routing_msg(self, msg, sender):
         if isinstance(msg, DIO):
+            # Compute real route cost
             route_cost = msg.metric_value + 1
+
             if self.own_metric < route_cost:
                 self.logger.debug("Do not use DIO: route is too bad")
                 if self.own_metric + 2 < route_cost:
                     self.logger.info("Neighbor may be interested by our DIO")
                     self.broadcast_message(DIO(self.own_metric))
             else:
-                with pyroute2.IPDB() as ipdb:
-                    try:
-                        with ipdb.routes['default'] as default_route:
-                            self.logger.debug("Drop current default route")
-                            default_route.remove()
-                    except KeyError:
-                        # No default route, ok.
-                        pass
+                self.logger.debug("Neighbor %s is an acceptable successor", sender)
 
-                    self._successors[sender] = route_cost
+                # Add route
+                self.route_manager.add_route(None, sender, route_cost)
 
-                    if self.own_metric > route_cost:
-                        self.logger.info("Update our metric to %d", route_cost)
-                        self.own_metric = route_cost
+                # Update position in the DODAG
+                if self.own_metric > route_cost:
+                    self.logger.info("Update our metric to %d", route_cost)
+                    self.own_metric = route_cost
 
-                        self.logger.debug("Check if old successors are still usable")
-                        for successor in list(self._successors.keys()):
-                            if self._successors[successor] > self.own_metric:
-                                self.logger.info("Drop successor '%s': too high metric (was %d)", successor,
-                                                 self._successors[successor])
-                                del self._successors[successor]
+                    self.logger.debug("Check if old successors are still usable")
+                    self.route_manager.filter_out(destination=None, max_metric=self.own_metric + 1)
 
-                        self.logger.debug("Inform neighbors that we have changed our metric")
-                        self.broadcast_message(DIO(self.own_metric))
-
-                    if len(self._successors) != 0:
-                        multipath = [{'gateway': key, 'hops': value} for key, value in self._successors.items()]
-                        ipdb.routes.add(dst="default", multipath=multipath).commit()
+                    self.logger.debug("Inform neighbors that we have changed our metric")
+                    self.broadcast_message(DIO(self.own_metric))
 
                     # TODO: we send RREP at each successor change. We should do that only sometimes.
-                    self.logger.info("Refresh host route")
-                    nexthop = self.get_a_successor()
-                    if nexthop is not None:
-                        self.send_msg(RREP(self.own_ip, "172.18.0.1", 0), destination=nexthop)
+                    successor = self.route_manager.get_nexthop(None)
+                    if successor is not None:
+                        self.logger.info("Refresh host route")
+                        # TODO: sink address is hardcoded here
+                        self.send_msg(RREP(self.own_ip, "172.18.0.1", 0), destination=successor)
                     else:
-                        self.logger.warning("Not sending RREP: no more successor")
+                        self.logger.error("Unable to send RREP: no more successor")
 
         elif isinstance(msg, RREP):
-            with pyroute2.IPDB() as ipdb:
-                route_cost = msg.hops + 1
+            # Real route cost: msg.hops is only the distance between the sender and the destination, without the link
+            # between here and the sender
+            route_cost = msg.hops + 1
 
-                if not self.is_neighbor(msg.source):
-                    try:
-                        with ipdb.routes[msg.source] as route:
-                            self.logger.debug("Drop the current route towards %s" % msg.source)
-                            route.remove()
-                    except KeyError:
-                        # No such route, ok.
-                        pass
+            self.route_manager.add_route(msg.source, sender, route_cost)
 
-                    # Update own routing table
-                    try:
-                        self.routing_table[msg.source][sender] = route_cost
-                    except KeyError:
-                        self.routing_table[msg.source] = {sender: route_cost}
-
-                    # Recreate the route
-                    if len(self.routing_table[msg.source]) != 0:
-                        multipath = [{'gateway': key, 'hops': value} for key, value in
-                                     self.routing_table[msg.source].items()]
-                        self.logger.info("Updating routing table: next hops for %s are %r", msg.source,
-                                         self.routing_table[msg.source])
-                        ipdb.routes.add(dst=msg.source + "/32", multipath=multipath).commit()
-
-                # Update RREP
-                msg.hops = route_cost
-
-                # Forward RREP
-                if msg.destination == self.own_ip:
-                    self.logger.debug("RREP has reached its destination")
-                else:
-                    nexthop = self.get_a_nexthop(msg.destination)
-                    if nexthop is not None:
-                        self.logger.info("Forward RREP farther")
+            # Update and forward RREP
+            msg.hops = route_cost
+            if msg.destination == self.own_ip:
+                self.logger.debug("RREP has reached its destination")
+            else:
+                nexthop = self.route_manager.get_nexthop(msg.destination)
+                if nexthop is not None:
+                    if self.route_manager.is_successor(nexthop):
+                        self.logger.info("Forward %s to %s", msg.message_type, nexthop)
                         self.send_msg(msg, destination=nexthop)
                     else:
-                        self.logger.info("Drop RREP: no route towards %s" % msg.destination)
+                        self.logger.error("Trying to send a RREP through %s, which is not a successor" % nexthop)
+                else:
+                    self.logger.error("Unable to forward %s: no route towards %s", msg.message_type, msg.destination)
         else:
             self.logger.warning("Received unknown message type: %d" % msg.message_type)
 
@@ -209,7 +259,7 @@ class LrpProcess:
                 continue
             msg = lrp.message.Message.parse(data)
             self.logger.info("Received %s from %s", msg, sender)
-            self.ensure_is_neighbor(sender)
+            self.route_manager.ensure_is_neighbor(sender)
             self.handle_routing_msg(msg, sender)
 
     def send_msg(self, msg, destination):
