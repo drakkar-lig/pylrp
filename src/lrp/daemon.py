@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import logging
+import os
 import select
 import socket
 import struct
+import fcntl
 
 import click
 import iptc
@@ -13,20 +15,84 @@ import lrp
 from lrp.message import RREP, DIO
 
 
+class Tun:
+    TUNSETIFF = 0x400454ca
+    SIOCGIFINDEX = 0x8933
+
+    IFF_TUN = 0x0001
+    IFF_TAP = 0x0002
+
+    IFNAMSIZ = 16
+
+    _if_name_format = "tunerr%d"
+    _if_nb = 0
+    _if_idx = None
+
+    def __init__(self):
+        self.if_name = Tun._if_name_format % Tun._if_nb
+        Tun._if_nb += 1
+
+    def __enter__(self):
+        self.fd = os.open("/dev/net/tun", os.O_RDONLY)
+        ifs = fcntl.ioctl(self, Tun.TUNSETIFF,
+                          struct.pack("%dsH" % Tun.IFNAMSIZ, self.if_name.encode("ascii"), Tun.IFF_TUN))
+        self.if_name, _ = struct.unpack("%dsH" % Tun.IFNAMSIZ, ifs)
+        self.if_name = self.if_name.decode("ascii")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0) as s:
+            ifs = fcntl.ioctl(s, Tun.SIOCGIFINDEX, struct.pack("%dsi" % Tun.IFNAMSIZ, self.if_name.encode("ascii"), 0))
+        _, self._if_idx = struct.unpack("%dsi" % Tun.IFNAMSIZ, ifs)
+        with pyroute2.IPDB() as ipdb:
+            ipdb.interfaces['tunerr0'].up().commit()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        os.close(self.fd)
+
+    def fileno(self) -> int:
+        """Return the tun interface file descriptor"""
+        return self.fd
+
+    def idx(self) -> int:
+        """Return the tun interface index"""
+        return self._if_idx
+
+    def read(self):
+        return os.read(self.fd, 1518)
+
+    def hexdump(self, b):
+        i = 0
+        res = ""
+        while i < len(b):
+            res += "%02x" % b[i]
+            i += 1
+            if i % 16 == 0:
+                res += "\n"
+            elif i % 8 == 0:
+                res += "  "
+            elif i % 2 == 0:
+                res += " "
+        return res
+
+
 class RoutesManager:
     logger = logging.getLogger("LRP")
 
     non_routable_mark = non_routable_table = 21
+    non_routable_tun = None
 
     def __init__(self, interface):
-        self.routes = {}
         self.interface = interface
 
+        self.routes = {}
         self._hr_destinations = []
         self._predecessors = []
 
+    def __enter__(self):
         self._netfilter_init()
         self._netlink_init()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
     def ensure_is_neighbor(self, address):
         """Check if neighbor is declared. If it is not, add it as neighbor."""
@@ -104,7 +170,7 @@ class RoutesManager:
         if destination != "default":
             self._netfilter_is_predecessor(next_hop)
 
-    def filter_out(self, destination, max_metric: int=None):
+    def filter_out(self, destination, max_metric: int = None):
         """Filter out some routes, according to some constraints."""
 
         if destination is None:
@@ -163,8 +229,7 @@ class RoutesManager:
 
             self.logger.debug("Set route & rule for non-routable packets")
             ipdb.rules.add(fwmark=self.non_routable_mark, fwmask=0xffffffff, table=self.non_routable_table).commit()
-            # TODO: self.non_routable_interface is not now implemented, we cannot use it now.
-            #ipdb.routes.add(dst="default", table=self.non_routable_table, index=self.non_routable_iface).commit()
+            ipdb.routes.add(dst="default", table=self.non_routable_table, oif=self.non_routable_tun).commit()
 
     def _netlink_update_route(self, destination):
         """Must be called whenever self.routes[destination] has changed. Keep netlink synchronized with this change."""
@@ -186,7 +251,8 @@ class RoutesManager:
             # Recreate the route
             if len(self.routes[destination]) != 0:
                 multipath = [{'gateway': key, 'hops': value} for key, value in self.routes[destination].items()]
-                self.logger.info("Updating routing table: next hops for '%s' are %r", destination, self.routes[destination])
+                self.logger.info("Updating routing table: next hops for '%s' are %r", destination,
+                                 self.routes[destination])
                 ipdb.routes.add(dst=destination, multipath=multipath).commit()
 
 
@@ -209,6 +275,7 @@ class LrpProcess:
         if own_metric is not None:
             self.own_metric = own_metric
         self._successors = {}
+        self.non_routable_tun = Tun()
         self.route_manager = RoutesManager(interface=self.idx)
 
     def __enter__(self):
@@ -235,6 +302,13 @@ class LrpProcess:
         self.uni_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.uni_socket.bind((self.own_ip, lrp.conf['service_port']))
 
+        self.logger.debug("Create tun interface for dropped packets")
+        self.non_routable_tun = self.non_routable_tun.__enter__()
+        self.logger.debug("Interface name: %s" % self.non_routable_tun.if_name)
+
+        self.route_manager.non_routable_tun = self.non_routable_tun.idx()
+        self.route_manager.__enter__()
+
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -242,6 +316,11 @@ class LrpProcess:
         self.bdc_out_socket.close()
         self.bdc_in_socket.close()
         self.uni_socket.close()
+
+        self.logger.debug("Close %s interface", self.non_routable_tun.if_name)
+        self.non_routable_tun.__exit__(exc_type, exc_val, exc_tb)
+
+        self.route_manager.__exit__(exc_type, exc_val, exc_tb)
 
     def handle_routing_msg(self, msg, sender):
         if isinstance(msg, DIO):
@@ -306,15 +385,21 @@ class LrpProcess:
     def wait_event(self):
         self.broadcast_message(DIO(self.own_metric))
         while True:
-            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket], [], [])
-            data, (sender, _) = rr[0].recvfrom(16)
-            if sender == self.own_ip:
-                self.logger.debug("Skip a message from ourselves")
-                continue
-            msg = lrp.message.Message.parse(data)
-            self.logger.info("Received %s from %s", msg, sender)
-            self.route_manager.ensure_is_neighbor(sender)
-            self.handle_routing_msg(msg, sender)
+            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket, self.non_routable_tun], [], [])
+            if rr[0] is self.non_routable_tun:
+                msg = self.non_routable_tun.read()
+                source = socket.inet_ntoa(msg[16:20])
+                destination = socket.inet_ntoa(msg[20:24])
+                self.logger.warning("Drop a packet from %s to %s", source, destination)
+            else:
+                data, (sender, _) = rr[0].recvfrom(16)
+                if sender == self.own_ip:
+                    self.logger.debug("Skip a message from ourselves")
+                    continue
+                msg = lrp.message.Message.parse(data)
+                self.logger.info("Received %s from %s", msg, sender)
+                self.route_manager.ensure_is_neighbor(sender)
+                self.handle_routing_msg(msg, sender)
 
     def send_msg(self, msg, destination):
         self.logger.info("Send %s to %s" % (msg, destination))
