@@ -80,8 +80,9 @@ class RoutesManager:
     non_routable_mark = non_routable_table = 21
     non_routable_tun = None
 
-    def __init__(self, interface):
-        self.interface = interface
+    def __init__(self, lrpp):
+        """lrpp: the LRP process"""
+        self.lrpp = lrpp
 
         self.routes = {}
         self._hr_destinations = []
@@ -100,7 +101,7 @@ class RoutesManager:
         with pyroute2.IPDB() as ipdb:
             if address not in ipdb.routes:
                 self.logger.info("Adding %s as neighbor" % address)
-                ipdb.routes.add(dst=address, oif=self.interface,
+                ipdb.routes.add(dst=address, oif=self.lrpp.idx,
                                 scope=pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK'],
                                 proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC']) \
                     .commit()
@@ -189,8 +190,8 @@ class RoutesManager:
             self._netlink_update_route(destination)
 
     def _netfilter_init(self):
-        self.logger.debug("Flush firewall rules")
         mangle_prerouting = iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING")
+        self.logger.debug("Flush firewall rules")
         mangle_prerouting.flush()
 
         self.logger.debug("Add firewall rule for non-routable packets")
@@ -217,11 +218,17 @@ class RoutesManager:
 
     def _netlink_init(self):
         with pyroute2.IPDB() as ipdb:
-            self.logger.debug("Flush all routes & rules")
-            for key in ipdb.routes.keys():
-                route = ipdb.routes[key]
-                self.logger.debug("Drop a route towards %s" % route['dst'])
-                route.remove().commit()
+            if not self.lrpp.is_sink:
+                self.logger.debug("Flush all routes & rules")
+                for key in ipdb.routes.keys():
+                    route = ipdb.routes[key]
+                    self.logger.debug("Drop a route towards %s" % route['dst'])
+                    route.remove().commit()
+            else:
+                # We suppose the current set of routes is working, we don't know how (it's out of the LRP tasks to know
+                # how does LRP's sink knows the routes out of the LRP network)
+                self.logger.debug("Not flushing current routes: is a sink")
+
             for key in list(ipdb.rules.keys()):
                 if key.fwmark == self.non_routable_mark and key.fwmask == 0xffffffff:
                     self.logger.debug("Drop a rule matching the non routable mark")
@@ -261,8 +268,9 @@ class LrpProcess:
 
     own_metric = 2 ** 16 - 1
 
-    def __init__(self, interface, own_metric=None):
+    def __init__(self, interface, own_metric=None, is_sink=False):
         self.interface = interface
+        self.is_sink = is_sink
         with pyroute2.IPRoute() as ip:
             try:
                 self.idx = ip.link_lookup(ifname=self.interface)[0]
@@ -276,7 +284,7 @@ class LrpProcess:
             self.own_metric = own_metric
         self._successors = {}
         self.non_routable_tun = Tun()
-        self.route_manager = RoutesManager(interface=self.idx)
+        self.route_manager = RoutesManager(self)
 
     def __enter__(self):
         with pyroute2.IPRoute() as ip:
@@ -308,6 +316,8 @@ class LrpProcess:
 
         self.route_manager.non_routable_tun = self.non_routable_tun.idx()
         self.route_manager.__enter__()
+
+        self.logger.debug("LRP%s process started" % " sink" if self.is_sink else "")
 
         return self
 
@@ -413,8 +423,9 @@ class LrpProcess:
 @click.command()
 @click.argument("interface")
 @click.argument("metric", default=2 ** 16 - 1)
-def daemon(interface, metric):
-    with LrpProcess(interface, metric) as lrp:
+@click.option("--sink/--no-sink")
+def daemon(interface, metric, sink=False):
+    with LrpProcess(interface, metric, is_sink=sink) as lrp:
         lrp.wait_event()
 
 
