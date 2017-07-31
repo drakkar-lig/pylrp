@@ -85,15 +85,15 @@ class RoutesManager:
         self.lrpp = lrpp
 
         self.routes = {}
-        self._hr_destinations = []
-        self._predecessors = []
+        self._hr_destinations = {}
+        self._predecessors = {}
 
     def __enter__(self):
         self._netfilter_init()
         self._netlink_init()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
+        self._netfilter_clean()
 
     def ensure_is_neighbor(self, address):
         """Check if neighbor is declared. If it is not, add it as neighbor."""
@@ -143,7 +143,7 @@ class RoutesManager:
 
     def get_mac(self, next_hop):
         with pyroute2.IPRoute() as ipr:
-            return ipr.neigh("dump", dst=next_hop)[0].get_attr('NDA_LLADDR')
+            return ipr.neigh("dump", dst=next_hop)[0].get_attr('NDA_LLADDR').upper()
 
     def add_route(self, destination, next_hop, metric):
         """Add a route to `destination`, through `next_hop`, with cost `metric`. If a route with the same
@@ -195,10 +195,30 @@ class RoutesManager:
         mangle_prerouting.flush()
 
         self.logger.debug("Add firewall rule for non-routable packets")
-        rule = iptc.Rule()
-        rule.target = iptc.Target(rule, "MARK")
-        rule.target.set_mark = "%#x" % self.non_routable_mark
-        mangle_prerouting.append_rule(rule)
+        self._default_mark_rule = iptc.Rule()
+        self._default_mark_rule.target = iptc.Target(self._default_mark_rule, "MARK")
+        self._default_mark_rule.target.set_mark = "%#x" % self.non_routable_mark
+        mangle_prerouting.append_rule(self._default_mark_rule)
+
+    def _netfilter_clean(self):
+        mangle_prerouting = iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING")
+
+        # Drop firewall rules for packets following a host route
+        for rule in self._hr_destinations.values():
+            self.logger.debug("Clean firewall rule towards %s", rule.dst)
+            mangle_prerouting.delete_rule(rule)
+        self._hr_destinations.clear()
+
+        # Drop firewall rules for packets coming from a predecessor
+        for rule in self._predecessors.values():
+            self.logger.debug("Clean firewall rule through %s", rule.matches[0].mac_source)
+            mangle_prerouting.delete_rule(rule)
+        self._predecessors.clear()
+
+        # Drop 'default' MARK firewall rule
+        self.logger.debug("Clean firewall rule for non-routable packets")
+        mangle_prerouting.delete_rule(self._default_mark_rule)
+        self._default_mark_rule = None
 
     def _netfilter_is_predecessor(self, next_hop):
         if next_hop not in self._predecessors:
@@ -208,6 +228,7 @@ class RoutesManager:
             rule.add_match(match)
             rule.target = iptc.Target(rule, "ACCEPT")
             iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING").insert_rule(rule)
+            self._predecessors[next_hop] = rule
 
     def _netfilter_is_destination(self, destination):
         if destination != "default" and destination not in self._hr_destinations:
@@ -215,6 +236,7 @@ class RoutesManager:
             rule.dst = destination
             rule.target = iptc.Target(rule, "ACCEPT")
             iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING").insert_rule(rule)
+            self._hr_destinations[destination] = rule
 
     def _netlink_init(self):
         with pyroute2.IPDB() as ipdb:
