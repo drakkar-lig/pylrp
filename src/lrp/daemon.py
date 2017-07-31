@@ -93,6 +93,7 @@ class RoutesManager:
         self._netlink_init()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self._netlink_clean()
         self._netfilter_clean()
 
     def ensure_is_neighbor(self, address):
@@ -240,25 +241,27 @@ class RoutesManager:
 
     def _netlink_init(self):
         with pyroute2.IPDB() as ipdb:
-            if not self.lrpp.is_sink:
-                self.logger.debug("Flush all routes & rules")
-                for key in ipdb.routes.keys():
-                    route = ipdb.routes[key]
-                    self.logger.debug("Drop a route towards %s" % route['dst'])
-                    route.remove().commit()
-            else:
-                # We suppose the current set of routes is working, we don't know how (it's out of the LRP tasks to know
-                # how does LRP's sink knows the routes out of the LRP network)
-                self.logger.debug("Not flushing current routes: is a sink")
-
-            for key in list(ipdb.rules.keys()):
-                if key.fwmark == self.non_routable_mark and key.fwmask == 0xffffffff:
-                    self.logger.debug("Drop a rule matching the non routable mark")
-                    ipdb.rules[key].remove().commit()
-
             self.logger.debug("Set route & rule for non-routable packets")
             ipdb.rules.add(fwmark=self.non_routable_mark, fwmask=0xffffffff, table=self.non_routable_table).commit()
             ipdb.routes.add(dst="default", table=self.non_routable_table, oif=self.non_routable_tun).commit()
+
+    def _netlink_clean(self):
+        with pyroute2.IPDB() as ipdb:
+            # Drop all routes inserted by LRP in the kernel routing table
+            for destination in self.routes:
+                self.logger.debug("Clean route towards %s", destination)
+                ipdb.routes[destination].remove().commit()
+            self.routes.clear()
+
+            # Drop the rule for non-routable packets
+            self.logger.debug("Clean rule matching the non routable mark")
+            try:
+                ipdb.rules[
+                    [key for key in ipdb.rules.keys()
+                     if key.fwmark == self.non_routable_mark and key.fwmask == 0xffffffff][0]
+                ].remove().commit()
+            except IndexError:
+                self.logger.error("Unable to find the rule matching the non routable mark")
 
     def _netlink_update_route(self, destination):
         """Must be called whenever self.routes[destination] has changed. Keep netlink synchronized with this change."""
