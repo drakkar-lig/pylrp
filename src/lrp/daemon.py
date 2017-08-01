@@ -123,11 +123,23 @@ class RoutesManager:
             return False
 
     def is_successor(self, nexthop):
+        # Check the routes that LRP knows
         try:
-            return nexthop in self.routes['default']
+            if nexthop in self.routes['default']:
+                return True
         except KeyError:
-            # No default route -> no successor at all
-            return False
+            # No default route known by LRP. Continue...
+            pass
+        # Check if the system knows one default route we don't know
+        with pyroute2.IPDB() as ipdb:
+            for route in ipdb.routes.filter({'dst': "default"}):
+                if nexthop == route['route']['gateway']:
+                    return True
+                for nh in route['route']['multipath']:
+                    if nexthop == nh['gateway']:
+                        return True
+        # Unable to find this neighbor in any default route. It is not a successor.
+        return False
 
     def get_nexthop(self, destination=None):
         """Get a next_hop towards a `destination`. If `destination` is None, get a successor."""
@@ -137,7 +149,14 @@ class RoutesManager:
                     route = ipr.get_default_routes()[0]
                 else:
                     route = ipr.route('get', dst=destination)[0]
-            return route.get_attr('RTA_GATEWAY')
+                nexthop = route.get_attr('RTA_GATEWAY')
+                if nexthop is not None:
+                    # We have a route towards this destination
+                    return nexthop
+                oif = route.get_attr('RTA_OIF')
+                if oif is not None:
+                    # The destination is on link, return itself
+                    return destination
         except pyroute2.NetlinkError:
             # No route towards the destination
             return None
