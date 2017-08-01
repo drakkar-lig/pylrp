@@ -387,6 +387,8 @@ class LrpProcess:
                 if self.own_metric > route_cost:
                     self.logger.info("Update our metric to %d", route_cost)
                     self.own_metric = route_cost
+
+                    assert self.sink is None, "Trying to change the sink we are attached to"
                     if self.sink != msg.sink:
                         self.logger.info("Update our sink to %s", msg.sink)
                         self.sink = msg.sink
@@ -398,9 +400,11 @@ class LrpProcess:
                     self.broadcast_message(DIO(self.own_metric, sink=self.sink))
 
                     # TODO: we send RREP at each successor change. We should do that only sometimes.
+                    self.logger.info("Refresh host route")
                     successor = self.route_manager.get_nexthop(None)
                     if successor is not None:
-                        self.logger.info("Refresh host route")
+                        assert self.route_manager.is_successor(successor), \
+                            "Trying to send a RREP through %s, which is not a successor (forbidden!)"
                         self.send_msg(RREP(self.own_ip, self.sink, 0), destination=successor)
                     else:
                         self.logger.error("Unable to send RREP: no more successor")
@@ -419,11 +423,10 @@ class LrpProcess:
             else:
                 nexthop = self.route_manager.get_nexthop(msg.destination)
                 if nexthop is not None:
-                    if self.route_manager.is_successor(nexthop):
-                        self.logger.info("Forward %s to %s", msg.message_type, nexthop)
-                        self.send_msg(msg, destination=nexthop)
-                    else:
-                        self.logger.error("Trying to send a RREP through %s, which is not a successor" % nexthop)
+                    assert self.route_manager.is_successor(nexthop), \
+                        "Trying to send a RREP through %s, which is not a successor (forbidden!)" % nexthop
+                    self.logger.info("Forward %s to %s", msg.message_type, nexthop)
+                    self.send_msg(msg, destination=nexthop)
                 else:
                     self.logger.error("Unable to forward %s: no route towards %s", msg.message_type, msg.destination)
         else:
