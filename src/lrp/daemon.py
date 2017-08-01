@@ -311,6 +311,11 @@ class LrpProcess:
         self.non_routable_tun = Tun()
         self.route_manager = RoutesManager(self)
 
+        if self.is_sink:
+            self.sink = self.own_ip
+        else:
+            self.sink = None
+
     def __enter__(self):
         with pyroute2.IPRoute() as ip:
             iface_address = ip.get_addr(index=self.idx)[0].get_attr('IFA_ADDRESS')
@@ -362,11 +367,16 @@ class LrpProcess:
             # Compute real route cost
             route_cost = msg.metric_value + 1
 
-            if self.own_metric < route_cost:
+            # Check if this sink is supported
+            if msg.sink is not None and self.sink is not None and msg.sink != self.sink:
+                self.logger.warning("Drop DIO: not the same sink (many sinks are not handled now)")
+
+            elif msg.sink is None or self.own_metric < route_cost:
                 self.logger.debug("Do not use DIO: route is too bad")
                 if self.own_metric + 2 < route_cost:
                     self.logger.info("Neighbor may be interested by our DIO")
-                    self.broadcast_message(DIO(self.own_metric))
+                    self.broadcast_message(DIO(self.own_metric, sink=self.sink))
+
             else:
                 self.logger.debug("Neighbor %s is an acceptable successor", sender)
 
@@ -377,19 +387,21 @@ class LrpProcess:
                 if self.own_metric > route_cost:
                     self.logger.info("Update our metric to %d", route_cost)
                     self.own_metric = route_cost
+                    if self.sink != msg.sink:
+                        self.logger.info("Update our sink to %s", msg.sink)
+                        self.sink = msg.sink
 
                     self.logger.debug("Check if old successors are still usable")
                     self.route_manager.filter_out(destination=None, max_metric=self.own_metric + 1)
 
                     self.logger.debug("Inform neighbors that we have changed our metric")
-                    self.broadcast_message(DIO(self.own_metric))
+                    self.broadcast_message(DIO(self.own_metric, sink=self.sink))
 
                     # TODO: we send RREP at each successor change. We should do that only sometimes.
                     successor = self.route_manager.get_nexthop(None)
                     if successor is not None:
                         self.logger.info("Refresh host route")
-                        # TODO: sink address is hardcoded here
-                        self.send_msg(RREP(self.own_ip, "172.18.0.1", 0), destination=successor)
+                        self.send_msg(RREP(self.own_ip, self.sink, 0), destination=successor)
                     else:
                         self.logger.error("Unable to send RREP: no more successor")
 
@@ -418,7 +430,7 @@ class LrpProcess:
             self.logger.warning("Received unknown message type: %d" % msg.message_type)
 
     def wait_event(self):
-        self.broadcast_message(DIO(self.own_metric))
+        self.broadcast_message(DIO(self.own_metric, sink=self.sink))
         while True:
             rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket, self.non_routable_tun], [], [])
             if rr[0] is self.non_routable_tun:

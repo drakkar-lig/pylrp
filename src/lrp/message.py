@@ -19,9 +19,9 @@ class MessageType(enum.IntEnum):
         return "%s" % self._name_
 
 
-
 class Message(metaclass=abc.ABCMeta):
     _message_types = {}
+    null_ip_address = "0.0.0.0"
     message_type = None  # Should be filled by subclasses
 
     @classmethod
@@ -53,16 +53,23 @@ class DIO(Message):
     @classmethod
     def parse(cls, flow):
         metric_value = int.from_bytes(flow[1:3], lrp.conf['endianess'])
-        return cls(metric_value)
+        sink = socket.inet_ntoa(flow[3:8])
+        if sink == Message.null_ip_address:
+            sink = None
+        return cls(metric_value, sink)
 
-    def __init__(self, metric_value):
+    def __init__(self, metric_value, sink):
         self.metric_value = metric_value
+        self.sink = sink
 
     def dump(self):
-        return super(DIO, self).dump() + self.metric_value.to_bytes(2, lrp.conf['endianess'])
+        result = b""
+        result += self.metric_value.to_bytes(2, lrp.conf['endianess'])
+        result += socket.inet_aton(self.sink if self.sink is not None else Message.null_ip_address)
+        return super(DIO, self).dump() + result
 
     def __str__(self):
-        return "%s <metric_value=%d>" % (self.__class__.__name__, self.metric_value)
+        return "%s <metric_value=%d sink=%s>" % (self.__class__.__name__, self.metric_value, self.sink)
 
 
 @Message.record_message_type
@@ -84,7 +91,7 @@ class RREP(Message):
     def dump(self):
         result = b""
         result += socket.inet_aton(self.source)
-        result += socket.inet_aton(self.destination)
+        result += socket.inet_aton(self.destination if self.destination is not None else Message.null_ip_address)
         result += self.hops.to_bytes(2, lrp.conf['endianess'])
         return super(RREP, self).dump() + result
 
