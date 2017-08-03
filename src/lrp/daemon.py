@@ -186,7 +186,7 @@ class RoutesManager:
 
         if changed:
             # Synchronize netlink
-            self._update_route(destination)
+            self._netlink_update_route(destination)
 
     def _netfilter_init(self):
         self.logger.debug("Flush firewall rules")
