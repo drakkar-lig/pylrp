@@ -398,6 +398,7 @@ class LrpProcess:
 
             else:
                 self.logger.debug("Neighbor %s is an acceptable successor", sender)
+                was_already_successor = self.route_manager.is_successor(sender)
 
                 # Add route
                 self.route_manager.add_route(None, sender, route_cost)
@@ -418,15 +419,10 @@ class LrpProcess:
                     self.logger.debug("Inform neighbors that we have changed our metric")
                     self.broadcast_message(DIO(self.own_metric, sink=self.sink))
 
-                    # TODO: we send RREP at each successor change. We should do that only sometimes.
-                    self.logger.info("Refresh host route")
-                    successor = self.route_manager.get_nexthop(None)
-                    if successor is not None:
-                        assert self.route_manager.is_successor(successor), \
-                            "Trying to send a RREP through %s, which is not a successor (forbidden!)"
-                        self.send_msg(RREP(self.own_ip, self.sink, 0), destination=successor)
-                    else:
-                        self.logger.error("Unable to send RREP: no more successor")
+                if not was_already_successor:
+                    # This neighbor does not know us as predecessor. Send RREP
+                    self.logger.info("Create host route through %s" % sender)
+                    self.send_msg(RREP(self.own_ip, self.sink, 0), destination=sender)
 
         elif isinstance(msg, RREP):
             # Real route cost: msg.hops is only the distance between the sender and the destination, without the link
