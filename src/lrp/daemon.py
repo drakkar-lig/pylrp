@@ -408,8 +408,9 @@ class LrpProcess:
                     self.logger.info("Update our metric to %d", route_cost)
                     self.own_metric = route_cost
 
-                    assert self.sink is None, "Trying to change the sink we are attached to"
                     if self.sink != msg.sink:
+                        assert self.sink is None, \
+                            "Trying to change the sink we are attached to (%s -> %s)" % (self.sink, msg.sink)
                         self.logger.info("Update our sink to %s", msg.sink)
                         self.sink = msg.sink
 
