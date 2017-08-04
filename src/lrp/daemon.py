@@ -1,7 +1,7 @@
 import abc
 import logging
 
-from lrp.message import RREP, DIO, Message
+from lrp.message import RREP, DIO, Message, RERR
 
 
 class LrpProcess(metaclass=abc.ABCMeta):
@@ -150,6 +150,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
 
     def handle_non_routable_packet(self, source, destination, sender):
         self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender, destination)
+        self.send_msg(RERR(error_source=source, error_destination=destination), destination=sender)
 
     @abc.abstractmethod
     def add_route(self, destination, next_hop, metric):
