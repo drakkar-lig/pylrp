@@ -2,7 +2,7 @@ import logging
 
 import click
 
-from lrp.daemon import daemon
+from lrp.linux_wrapper import daemon
 from lrp.sniffer import sniff
 
 
