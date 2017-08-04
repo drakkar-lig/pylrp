@@ -1,84 +1,21 @@
 #!/usr/bin/env python3
 
 import logging
-import os
 import select
 import socket
 import struct
-import fcntl
 
 import click
 import iptc
+import netfilterqueue
 import pyroute2
 
 import lrp
 from lrp.message import RREP, DIO
 
 
-class Tun:
-    TUNSETIFF = 0x400454ca
-    SIOCGIFINDEX = 0x8933
-
-    IFF_TUN = 0x0001
-    IFF_TAP = 0x0002
-
-    IFNAMSIZ = 16
-
-    _if_name_format = "tunerr%d"
-    _if_nb = 0
-    _if_idx = None
-
-    def __init__(self):
-        self.if_name = Tun._if_name_format % Tun._if_nb
-        Tun._if_nb += 1
-
-    def __enter__(self):
-        self.fd = os.open("/dev/net/tun", os.O_RDONLY)
-        ifs = fcntl.ioctl(self, Tun.TUNSETIFF,
-                          struct.pack("%dsH" % Tun.IFNAMSIZ, self.if_name.encode("ascii"), Tun.IFF_TUN))
-        self.if_name, _ = struct.unpack("%dsH" % Tun.IFNAMSIZ, ifs)
-        self.if_name = self.if_name.decode("ascii")
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0) as s:
-            ifs = fcntl.ioctl(s, Tun.SIOCGIFINDEX, struct.pack("%dsi" % Tun.IFNAMSIZ, self.if_name.encode("ascii"), 0))
-        _, self._if_idx = struct.unpack("%dsi" % Tun.IFNAMSIZ, ifs)
-        with pyroute2.IPDB() as ipdb:
-            ipdb.interfaces['tunerr0'].up().commit()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        os.close(self.fd)
-
-    def fileno(self) -> int:
-        """Return the tun interface file descriptor"""
-        return self.fd
-
-    def idx(self) -> int:
-        """Return the tun interface index"""
-        return self._if_idx
-
-    def read(self):
-        return os.read(self.fd, 1518)
-
-    def hexdump(self, b):
-        i = 0
-        res = ""
-        while i < len(b):
-            res += "%02x" % b[i]
-            i += 1
-            if i % 16 == 0:
-                res += "\n"
-            elif i % 8 == 0:
-                res += "  "
-            elif i % 2 == 0:
-                res += " "
-        return res
-
-
 class RoutesManager:
     logger = logging.getLogger("LRP")
-
-    non_routable_mark = non_routable_table = 21
-    non_routable_tun = None
 
     def __init__(self, lrpp):
         """lrpp: the LRP process"""
@@ -87,6 +24,7 @@ class RoutesManager:
         self.routes = {}
         self._hr_destinations = {}
         self._predecessors = {}
+        self._netfilter_non_routable_chain = None
 
     def __enter__(self):
         self._netfilter_init()
@@ -210,35 +148,33 @@ class RoutesManager:
             self._netlink_update_route(destination)
 
     def _netfilter_init(self):
-        mangle_prerouting = iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING")
+        self._netfilter_non_routable_chain = iptc.Chain(iptc.Table(iptc.Table.FILTER), "FORWARD")
         self.logger.debug("Flush firewall rules")
-        mangle_prerouting.flush()
+        self._netfilter_non_routable_chain.flush()
 
         self.logger.debug("Add firewall rule for non-routable packets")
-        self._default_mark_rule = iptc.Rule()
-        self._default_mark_rule.target = iptc.Target(self._default_mark_rule, "MARK")
-        self._default_mark_rule.target.set_mark = "%#x" % self.non_routable_mark
-        mangle_prerouting.append_rule(self._default_mark_rule)
+        self._non_routable_rule = iptc.Rule()
+        self._non_routable_rule.target = iptc.Target(self._non_routable_rule, "NFQUEUE")
+        self._non_routable_rule.target.queue_num = str(self.lrpp.non_routable_queue_nb)
+        self._netfilter_non_routable_chain.append_rule(self._non_routable_rule)
 
     def _netfilter_clean(self):
-        mangle_prerouting = iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING")
-
         # Drop firewall rules for packets following a host route
         for rule in self._hr_destinations.values():
             self.logger.debug("Clean firewall rule towards %s", rule.dst)
-            mangle_prerouting.delete_rule(rule)
+            self._netfilter_non_routable_chain.delete_rule(rule)
         self._hr_destinations.clear()
 
         # Drop firewall rules for packets coming from a predecessor
         for rule in self._predecessors.values():
             self.logger.debug("Clean firewall rule through %s", rule.matches[0].mac_source)
-            mangle_prerouting.delete_rule(rule)
+            self._netfilter_non_routable_chain.delete_rule(rule)
         self._predecessors.clear()
 
-        # Drop 'default' MARK firewall rule
+        # Drop non-routable packets detection
         self.logger.debug("Clean firewall rule for non-routable packets")
-        mangle_prerouting.delete_rule(self._default_mark_rule)
-        self._default_mark_rule = None
+        self._netfilter_non_routable_chain.delete_rule(self._non_routable_rule)
+        self._non_routable_rule = None
 
     def _netfilter_is_predecessor(self, next_hop):
         if next_hop not in self._predecessors:
@@ -247,7 +183,7 @@ class RoutesManager:
             match.mac_source = self.get_mac(next_hop)
             rule.add_match(match)
             rule.target = iptc.Target(rule, "ACCEPT")
-            iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING").insert_rule(rule)
+            self._netfilter_non_routable_chain.insert_rule(rule)
             self._predecessors[next_hop] = rule
 
     def _netfilter_is_destination(self, destination):
@@ -255,14 +191,11 @@ class RoutesManager:
             rule = iptc.Rule()
             rule.dst = destination
             rule.target = iptc.Target(rule, "ACCEPT")
-            iptc.Chain(iptc.Table(iptc.Table.MANGLE), "PREROUTING").insert_rule(rule)
+            self._netfilter_non_routable_chain.insert_rule(rule)
             self._hr_destinations[destination] = rule
 
     def _netlink_init(self):
-        with pyroute2.IPDB() as ipdb:
-            self.logger.debug("Set route & rule for non-routable packets")
-            ipdb.rules.add(fwmark=self.non_routable_mark, fwmask=0xffffffff, table=self.non_routable_table).commit()
-            ipdb.routes.add(dst="default", table=self.non_routable_table, oif=self.non_routable_tun).commit()
+        pass
 
     def _netlink_clean(self):
         with pyroute2.IPDB() as ipdb:
@@ -271,16 +204,6 @@ class RoutesManager:
                 self.logger.debug("Clean route towards %s", destination)
                 ipdb.routes[destination].remove().commit()
             self.routes.clear()
-
-            # Drop the rule for non-routable packets
-            self.logger.debug("Clean rule matching the non routable mark")
-            try:
-                ipdb.rules[
-                    [key for key in ipdb.rules.keys()
-                     if key.fwmark == self.non_routable_mark and key.fwmask == 0xffffffff][0]
-                ].remove().commit()
-            except IndexError:
-                self.logger.error("Unable to find the rule matching the non routable mark")
 
     def _netlink_update_route(self, destination):
         """Must be called whenever self.routes[destination] has changed. Keep netlink synchronized with this change."""
@@ -311,6 +234,7 @@ class LrpProcess:
     logger = logging.getLogger("LRP")
 
     own_metric = 2 ** 16 - 1
+    non_routable_queue_nb = 7
 
     def __init__(self, interface, own_metric=None, is_sink=False):
         self.interface = interface
@@ -327,7 +251,7 @@ class LrpProcess:
         if own_metric is not None:
             self.own_metric = own_metric
         self._successors = {}
-        self.non_routable_tun = Tun()
+        self.dropped_queue = netfilterqueue.NetfilterQueue()
         self.route_manager = RoutesManager(self)
 
         if self.is_sink:
@@ -359,11 +283,19 @@ class LrpProcess:
         self.uni_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.uni_socket.bind((self.own_ip, lrp.conf['service_port']))
 
-        self.logger.debug("Create tun interface for dropped packets")
-        self.non_routable_tun = self.non_routable_tun.__enter__()
-        self.logger.debug("Interface name: %s" % self.non_routable_tun.if_name)
+        def queue_packet_handler(packet):
+            payload = packet.get_payload()
+            source = socket.inet_ntoa(payload[12:16])
+            destination = socket.inet_ntoa(payload[16:20])
+            sender = ":".join(["%02x" % b for b in packet.get_hw()[0:6]])
+            self.handle_non_routable_packet(source, destination, sender)
+            packet.drop()
 
-        self.route_manager.non_routable_tun = self.non_routable_tun.idx()
+        self.logger.debug("Bind netfilter non-routable packets to queue %d", self.non_routable_queue_nb)
+        self.dropped_queue.bind(self.non_routable_queue_nb, queue_packet_handler)
+        self._dropped_queue_socket = socket.fromfd(self.dropped_queue.get_fd(), socket.AF_UNIX, socket.SOCK_STREAM)
+        self._dropped_queue_socket.setblocking(False)
+
         self.route_manager.__enter__()
 
         self.logger.debug("LRP%s process started" % " sink" if self.is_sink else "")
@@ -376,8 +308,8 @@ class LrpProcess:
         self.bdc_in_socket.close()
         self.uni_socket.close()
 
-        self.logger.debug("Close %s interface", self.non_routable_tun.if_name)
-        self.non_routable_tun.__exit__(exc_type, exc_val, exc_tb)
+        self._dropped_queue_socket.close()
+        self.dropped_queue.unbind()
 
         self.route_manager.__exit__(exc_type, exc_val, exc_tb)
 
@@ -448,15 +380,15 @@ class LrpProcess:
         else:
             self.logger.warning("Received unknown message type: %d" % msg.message_type)
 
+    def handle_non_routable_packet(self, source, destination, sender):
+        self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender, destination)
+
     def wait_event(self):
         self.broadcast_message(DIO(self.own_metric, sink=self.sink))
         while True:
-            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket, self.non_routable_tun], [], [])
-            if rr[0] is self.non_routable_tun:
-                msg = self.non_routable_tun.read()
-                source = socket.inet_ntoa(msg[16:20])
-                destination = socket.inet_ntoa(msg[20:24])
-                self.logger.warning("Drop a packet from %s to %s", source, destination)
+            rr, _, _ = select.select([self.bdc_in_socket, self.uni_socket, self._dropped_queue_socket], [], [])
+            if rr[0] is self._dropped_queue_socket:
+                self.dropped_queue.run(block=False)
             else:
                 data, (sender, _) = rr[0].recvfrom(16)
                 if sender == self.own_ip:
