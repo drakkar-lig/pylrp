@@ -2,9 +2,6 @@ import logging
 
 import click
 
-from lrp.linux_wrapper import daemon
-from lrp.sniffer import sniff
-
 
 @click.group()
 @click.option("-v", "--verbose", count=True)
@@ -17,8 +14,19 @@ def cli(verbose):
         raise Exception("Use at most %d --verbose flags" % (len(log_levels) - 1))
 
 
-cli.add_command(daemon)
-cli.add_command(sniff)
-
 if __name__ == "__main__":
+    try:
+        from lrp.linux_wrapper import daemon
+
+        cli.add_command(daemon)
+    except ImportError:
+        pass
+
+    try:
+        from lrp.sniffer import sniff
+
+        cli.add_command(sniff)
+    except ImportError:
+        pass
+
     cli()
