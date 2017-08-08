@@ -97,3 +97,29 @@ class RREP(Message):
 
     def __str__(self):
         return "%s <source=%s destination=%s hops=%d>" % (self.message_type, self.source, self.destination, self.hops)
+
+
+@Message.record_message_type
+class RERR(Message):
+    message_type = MessageType.RERR
+
+    @classmethod
+    def parse(cls, flow):
+        error_source = socket.inet_ntoa(flow[1:5])
+        error_destination = socket.inet_ntoa(flow[5:9])
+        return cls(error_source, error_destination)
+
+    def __init__(self, error_source, error_destination):
+        self.error_source = error_source
+        self.error_destination = error_destination
+
+    def dump(self):
+        result = b""
+        result += socket.inet_aton(self.error_source)
+        result += socket.inet_aton(self.error_destination)
+        return super().dump() + result
+
+    def __str__(self):
+        return "%s <error_source=%s error_destination=%s>" % \
+               (self.message_type, self.error_source, self.error_destination)
+

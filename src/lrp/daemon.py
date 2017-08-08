@@ -1,7 +1,7 @@
 import abc
 import logging
 
-from lrp.message import RREP, DIO, Message
+from lrp.message import RREP, DIO, Message, RERR
 
 
 class LrpProcess(metaclass=abc.ABCMeta):
@@ -56,7 +56,13 @@ class LrpProcess(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def get_nexthop(self, destination=None):
-        """Get a next_hop towards a `destination`. If `destination` is None, get a successor."""
+        """Get a next_hop towards a `destination`. If `destination` is None, get a
+        successor. If there is no such next hop, return None"""
+
+    @abc.abstractmethod
+    def get_ip_from_mac(self, mac_address):
+        """Return the layer 3 address, given a layer 2 address. Return None if such
+        layer 2 address is unknown"""
 
     def handle_msg(self, msg, sender, is_broadcast: bool):
         """Handle a LRP message.
@@ -142,8 +148,32 @@ class LrpProcess(metaclass=abc.ABCMeta):
             else:
                 self.logger.error("Unable to forward %s: no route towards %s", rrep.message_type, rrep.destination)
 
-    def handle_non_routable_packet(self, source, destination, sender):
-        self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender, destination)
+    def _handle_RERR(self, rerr, sender, is_broadcast):
+        if self.is_successor(sender):
+            self.logger.info("Inform %s that we are its predecessor", sender)
+            self.send_msg(RREP(source=self.own_ip, destination=self.sink, hops=0), destination=sender)
+        else:
+            # Remove host route towards the unreachable destination
+            self.del_route(rerr.error_destination, sender)
+
+            if self.get_nexthop(rerr.error_destination) is not None:
+                self.logger.info("Drop RERR: we still have a route towards %s", rerr.error_destination)
+            else:
+                # No more next hop towards rerr.error_destination. Forward RERR.
+                next_hop = self.get_nexthop(rerr.error_source)
+                if next_hop is None:
+                    self.logger.warning("Unable to forward RERR: no route towards %s", rerr.error_source)
+                else:
+                    self.logger.info("Forward RERR")
+                    self.send_msg(rerr, destination=next_hop)
+
+    def handle_non_routable_packet(self, source, destination, sender_mac):
+        self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender_mac, destination)
+        sender_ip = self.get_ip_from_mac(sender_mac)
+        if sender_ip is not None:
+            self.send_msg(RERR(error_source=source, error_destination=destination), destination=sender_ip)
+        else:
+            self.logger.warning("Unable to warn about unreachable destination: unknown previous hop %s", sender_mac)
 
     @abc.abstractmethod
     def add_route(self, destination, next_hop, metric):
@@ -152,6 +182,12 @@ class LrpProcess(metaclass=abc.ABCMeta):
         by the new one. If a route with the same destination but with another
         next_hop exists, they coexists, with their own metric. If `destination`
         is None, it is the default route."""
+
+    @abc.abstractmethod
+    def del_route(self, destination, next_hop):
+        """Delete the route to `destination`, through `next_hop`. If a route with the
+        same destination but with another next_hop exists, the other one
+        continues to exist. If `destination` is None, it is the default route."""
 
     @abc.abstractmethod
     def filter_out(self, destination, max_metric: int = None):
