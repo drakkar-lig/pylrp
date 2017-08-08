@@ -53,7 +53,8 @@ class LinuxLrpProcess(LrpProcess):
         self.unicast_socket.bind((self.own_ip, lrp.conf['service_port']))
 
         # Initialize netfilter
-        self._netfilter_non_routable_chain = iptc.Chain(iptc.Table(iptc.Table.FILTER), "FORWARD")
+        self._netfilter_non_routable_table = iptc.Table(iptc.Table.FILTER)
+        self._netfilter_non_routable_chain = iptc.Chain(self._netfilter_non_routable_table, "FORWARD")
         self.logger.debug("Flush firewall rules")
         self._netfilter_non_routable_chain.flush()
 
@@ -62,6 +63,7 @@ class LinuxLrpProcess(LrpProcess):
         self._non_routable_rule.target = iptc.Target(self._non_routable_rule, "NFQUEUE")
         self._non_routable_rule.target.queue_num = str(self.non_routable_queue_nb)
         self._netfilter_non_routable_chain.append_rule(self._non_routable_rule)
+        self._netfilter_non_routable_table.commit()
 
         # Initialize netfilter queue
         self.logger.debug("Bind netfilter non-routable packets to queue %d", self.non_routable_queue_nb)
@@ -249,12 +251,12 @@ class LinuxLrpProcess(LrpProcess):
         except KeyError:
             # Destination was unknown
             self.routes[destination] = {next_hop: metric}
-            self._netfilter_is_destination(destination)
+            self._netfilter_ensure_is_destination(destination)
 
         # Synchronize netlink and netfilter
         self._netlink_update_route(destination)
         if destination != "default":
-            self._netfilter_is_predecessor(next_hop)
+            self._netfilter_ensure_is_predecessor(next_hop)
 
     def filter_out(self, destination, max_metric: int = None):
         """Filter out some routes, according to some constraints."""
@@ -274,23 +276,44 @@ class LinuxLrpProcess(LrpProcess):
             # Synchronize netlink
             self._netlink_update_route(destination)
 
-    def _netfilter_is_predecessor(self, next_hop):
-        if next_hop not in self._predecessors:
+    def _netfilter_ensure_is_predecessor(self, predecessor_ip):
+        """Ensure this node is known as a predecessor by the firewall."""
+        self._netfilter_non_routable_table.refresh()
+        predecessor_mac = self.get_mac(predecessor_ip)
+        # Find the rule corresponding to this predecessor in netfilter
+        for rule in self._netfilter_non_routable_chain.rules:
+            try:
+                if rule.matches[0].mac_source == predecessor_mac:
+                    break
+            except (IndexError, AttributeError):
+                pass
+        # Unable to find it. Add is as predecessor
+        else:
             rule = iptc.Rule()
             match = iptc.Match(rule, "mac")
-            match.mac_source = self.get_mac(next_hop)
+            match.mac_source = predecessor_mac
             rule.add_match(match)
             rule.target = iptc.Target(rule, "ACCEPT")
             self._netfilter_non_routable_chain.insert_rule(rule)
-            self._predecessors[next_hop] = rule
+            self._predecessors[predecessor_ip] = rule
+            self._netfilter_non_routable_table.commit()
+            self.logger.info("%s is now known as predecessor", predecessor_ip)
 
-    def _netfilter_is_destination(self, destination):
-        if destination != "default" and destination not in self._hr_destinations:
+    def _netfilter_ensure_is_destination(self, destination):
+        """Ensure this node is known as a host route destination by the firewall."""
+        self._netfilter_non_routable_table.refresh()
+        for rule in self._netfilter_non_routable_chain.rules:
+            if rule.dst == destination:
+                # `destination` is already a host route destination
+                break
+        else:
             rule = iptc.Rule()
             rule.dst = destination
             rule.target = iptc.Target(rule, "ACCEPT")
             self._netfilter_non_routable_chain.insert_rule(rule)
             self._hr_destinations[destination] = rule
+            self._netfilter_non_routable_table.commit()
+            self.logger.info("%s is now known as host route destination", destination)
 
     def _netlink_update_route(self, destination):
         """Must be called whenever self.routes[destination] has changed. Keep netlink
