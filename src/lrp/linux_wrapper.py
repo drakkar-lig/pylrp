@@ -263,7 +263,8 @@ class LinuxLrpProcess(LrpProcess):
         except KeyError:
             # Destination was unknown
             self.routes[destination] = {next_hop: metric}
-            self._netfilter_ensure_is_destination(destination)
+            if destination != "default":
+                self._netfilter_ensure_is_destination(destination)
 
         # Synchronize netlink and netfilter
         self._netlink_update_route(destination)
