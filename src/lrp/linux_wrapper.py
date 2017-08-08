@@ -233,9 +233,21 @@ class LinuxLrpProcess(LrpProcess):
             # address is unknown, it is certainly not a neighbor
             return False
 
-    def get_mac(self, next_hop):
-        with pyroute2.IPRoute() as ipr:
-            return ipr.neigh("dump", dst=next_hop)[0].get_attr('NDA_LLADDR').upper()
+    def get_mac_from_ip(self, ip_address):
+        try:
+            with pyroute2.IPRoute() as ipr:
+                return ipr.neigh("dump", dst=ip_address)[0].get_attr('NDA_LLADDR').upper()
+        except IndexError:
+            # Unknown IP address
+            return None
+
+    def get_ip_from_mac(self, mac_address):
+        try:
+            with pyroute2.IPRoute() as ipr:
+                return ipr.neigh("dump", lladdr=mac_address.lower())[0].get_attr('NDA_DST')
+        except IndexError:
+            # Unknown MAC address
+            return None
 
     def add_route(self, destination, next_hop, metric):
         # Get real destination
@@ -258,6 +270,24 @@ class LinuxLrpProcess(LrpProcess):
         if destination != "default":
             self._netfilter_ensure_is_predecessor(next_hop)
 
+    def del_route(self, destination, next_hop):
+        # Get real destination
+        if destination is None or destination == "0.0.0.0/0":
+            destination = "default"
+        elif '/' not in destination:
+            # Suppose it is a host route
+            destination += "/32"
+
+        # Update the routing table
+        try:
+            del self.routes[destination][next_hop]
+        except KeyError:
+            self.logger.warning("Attempting to delete route towards %s through %s, while it does not exists",
+                                destination, next_hop)
+
+        # Synchronize netlink
+        self._netlink_update_route(destination)
+
     def filter_out(self, destination, max_metric: int = None):
         """Filter out some routes, according to some constraints."""
 
@@ -279,7 +309,7 @@ class LinuxLrpProcess(LrpProcess):
     def _netfilter_ensure_is_predecessor(self, predecessor_ip):
         """Ensure this node is known as a predecessor by the firewall."""
         self._netfilter_non_routable_table.refresh()
-        predecessor_mac = self.get_mac(predecessor_ip)
+        predecessor_mac = self.get_mac_from_ip(predecessor_ip)
         # Find the rule corresponding to this predecessor in netfilter
         for rule in self._netfilter_non_routable_chain.rules:
             try:

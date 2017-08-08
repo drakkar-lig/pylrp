@@ -56,7 +56,13 @@ class LrpProcess(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def get_nexthop(self, destination=None):
-        """Get a next_hop towards a `destination`. If `destination` is None, get a successor."""
+        """Get a next_hop towards a `destination`. If `destination` is None, get a
+        successor. If there is no such next hop, return None"""
+
+    @abc.abstractmethod
+    def get_ip_from_mac(self, mac_address):
+        """Return the layer 3 address, given a layer 2 address. Return None if such
+        layer 2 address is unknown"""
 
     def handle_msg(self, msg, sender, is_broadcast: bool):
         """Handle a LRP message.
@@ -152,6 +158,12 @@ class LrpProcess(metaclass=abc.ABCMeta):
         by the new one. If a route with the same destination but with another
         next_hop exists, they coexists, with their own metric. If `destination`
         is None, it is the default route."""
+
+    @abc.abstractmethod
+    def del_route(self, destination, next_hop):
+        """Delete the route to `destination`, through `next_hop`. If a route with the
+        same destination but with another next_hop exists, the other one
+        continues to exist. If `destination` is None, it is the default route."""
 
     @abc.abstractmethod
     def filter_out(self, destination, max_metric: int = None):
