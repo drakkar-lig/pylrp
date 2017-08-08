@@ -120,6 +120,8 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 self.send_msg(RREP(self.own_ip, self.sink, 0), destination=sender)
 
     def _handle_RREP(self, rrep, sender, is_broadcast):
+        assert not is_broadcast, "Broadcast RREP are unacceptable"
+
         # Real route cost: msg.hops is only the distance between the sender and the destination, without the link
         # between here and the sender
         route_cost = rrep.hops + 1
