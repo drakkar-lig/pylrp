@@ -2,9 +2,6 @@ import logging
 
 import click
 
-from lrp.daemon import daemon
-from lrp.sniffer import sniff
-
 
 @click.group()
 @click.option("-v", "--verbose", count=True)
@@ -17,8 +14,29 @@ def cli(verbose):
         raise Exception("Use at most %d --verbose flags" % (len(log_levels) - 1))
 
 
-cli.add_command(daemon)
-cli.add_command(sniff)
+def _unavailable_subcommand(import_exception):
+    def unavailable(**kwargs):
+        raise import_exception
+
+    unavailable.__doc__ = """This command is not available: %s""" % import_exception.args
+    unavailable = click.command()(unavailable)
+    unavailable = click.argument("", nargs=1)(unavailable)
+    return unavailable
+
 
 if __name__ == "__main__":
+    try:
+        from lrp.linux_wrapper import daemon
+
+        cli.add_command(daemon)
+    except ImportError as e:
+        cli.add_command(_unavailable_subcommand(e), name="daemon")
+
+    try:
+        from lrp.sniffer import sniff
+
+        cli.add_command(sniff)
+    except ImportError as e:
+        cli.add_command(_unavailable_subcommand(e), name="sniff")
+
     cli()
