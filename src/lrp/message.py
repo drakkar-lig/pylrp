@@ -118,3 +118,8 @@ class RERR(Message):
         result += socket.inet_aton(self.error_source)
         result += socket.inet_aton(self.error_destination)
         return super().dump() + result
+
+    def __str__(self):
+        return "%s <error_source=%s error_destination=%s>" % \
+               (self.message_type, self.error_source, self.error_destination)
+
