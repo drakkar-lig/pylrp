@@ -334,11 +334,15 @@ class LinuxLrpProcess(LrpProcess):
                 pass
 
             # Recreate the route
-            if len(self.routes[destination]) != 0:
-                multipath = [{'gateway': key, 'hops': value} for key, value in self.routes[destination].items()]
-                self.logger.info("Updating routing table: next hops for '%s' are %r", destination,
-                                 self.routes[destination])
-                ipdb.routes.add(dst=destination, multipath=multipath).commit()
+            try:
+                if len(self.routes[destination]) != 0:
+                    multipath = [{'gateway': key, 'hops': value} for key, value in self.routes[destination].items()]
+                    self.logger.info("Updating routing table: next hops for '%s' are %r", destination,
+                                     self.routes[destination])
+                    ipdb.routes.add(dst=destination, multipath=multipath).commit()
+            except KeyError:
+                # No such route, don't need to insert it. Ok.
+                pass
 
 
 @click.command()
