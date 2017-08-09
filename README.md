@@ -67,9 +67,9 @@ To run LRP with its own network stack, I use this command:
                --env LANG=fr_FR.UTF-8 \
                --interactive --tty \
                "$IMAGE_NAME" \
-               python -m lrp -v daemon eth0
+               python -m lrp -v daemon
 
-Optionally, for the sink, add `0 --sink` to the last line.
+Optionally, for the sink, add `--metric 0 --sink` to the last line.
 
 To have a bash prompt on top of this node, e.g. to be able to see the
 routing table / to ping other machines, use:
