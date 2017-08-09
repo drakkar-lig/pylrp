@@ -25,6 +25,19 @@ However, the core of the protocol is available through an independent python
 abstract class: `lrp.daemon.LrpProcess`. To make it compliant with another 
 platform, one should subclass it, as `lrp.linux_wrapper.LinuxLrpProcess` do.
 
+### Configuration of linux system
+
+The host route packets through the interface from which the packet has come. 
+Obviously, it sends ICMP Redirect messages. However, we simulate a multi-hop 
+wireless network. We need to deactivate this: 
+`sysctl net.ipv4.conf.{eth0,default,all}.send_redirects=0`.
+
+Reverse-path filter drops packets coming from a host towards which we do not 
+have a route. If we can't answer, we drop. As the routing process itself does 
+not necessarily have a route towards an unknown node (and, at start, it does 
+not have a route at all), we must accept this kind of packets: 
+`sysctl net.ipv4.conf.{eth0,default,all}.rp_filter=0`.
+
 
 
 ## Testing
