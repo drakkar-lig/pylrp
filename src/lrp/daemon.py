@@ -1,7 +1,7 @@
 import abc
 import logging
 
-from lrp.message import RREP, DIO, Message, RERR
+from lrp.message import RREP, DIO, Message, RERR, RREQ
 
 
 class LrpProcess(metaclass=abc.ABCMeta):
@@ -170,12 +170,22 @@ class LrpProcess(metaclass=abc.ABCMeta):
                     self.send_msg(rerr, destination=next_hop)
 
     def handle_non_routable_packet(self, source, destination, sender_mac):
+        """Handle non-routable packet: all packets that does not either come from a
+        predecessor or follow a host route."""
+        assert not self.is_sink, "The sink should be able to route any packet"
         self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender_mac, destination)
         sender_ip = self.get_ip_from_mac(sender_mac)
         if sender_ip is not None:
             self.send_msg(RERR(error_source=source, error_destination=destination), destination=sender_ip)
         else:
             self.logger.warning("Unable to warn about unreachable destination: unknown previous hop %s", sender_mac)
+
+    def handle_unknown_host(self, destination):
+        """Handle the situation when the sink do not have a host route towards a node
+        into the network."""
+        assert self.is_sink, "Non-sink nodes does not handle unknown hosts, they use their default route instead"
+        self.logger.info("Unknown host %s. Flooding a RREQ to find it", destination)
+        self.send_msg(RREQ(searched_node=destination), destination=None)
 
     @abc.abstractmethod
     def add_route(self, destination, next_hop, metric):
