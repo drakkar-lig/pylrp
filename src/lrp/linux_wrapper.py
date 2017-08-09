@@ -62,6 +62,11 @@ class LinuxLrpProcess(LrpProcess):
 
         self.logger.debug("Add firewall rule for non-routable packets")
         self._non_routable_rule = iptc.Rule()
+        if self.is_sink:
+            # We are the sink: we expect to have a default route that does not
+            # depend on the LRP network. Allow to use this route, except for
+            # packets destined to the LRP network itself.
+            self._non_routable_rule.dst = self.network_prefix
         self._non_routable_rule.target = iptc.Target(self._non_routable_rule, "NFQUEUE")
         self._non_routable_rule.target.queue_num = str(self.non_routable_queue_nb)
         self._netfilter_non_routable_chain.append_rule(self._non_routable_rule)
@@ -72,10 +77,13 @@ class LinuxLrpProcess(LrpProcess):
 
         def queue_packet_handler(packet):
             payload = packet.get_payload()
-            source = socket.inet_ntoa(payload[12:16])
             destination = socket.inet_ntoa(payload[16:20])
-            sender = ":".join(["%02x" % b for b in packet.get_hw()[0:6]])
-            self.handle_non_routable_packet(source, destination, sender)
+            if self.is_sink:
+                self.handle_unknown_host(destination)
+            else:
+                source = socket.inet_ntoa(payload[12:16])
+                sender = ":".join(["%02x" % b for b in packet.get_hw()[0:6]])
+                self.handle_non_routable_packet(source, destination, sender)
             packet.drop()
 
         self.non_routables_queue.bind(self.non_routable_queue_nb, queue_packet_handler)
@@ -136,6 +144,15 @@ class LinuxLrpProcess(LrpProcess):
                 except IndexError:
                     raise Exception("%s: interface has no IP address" % self.interface)
             return self._own_ip
+
+    @property
+    def network_prefix(self):
+        # TODO: we currently do not manage any network prefix. This below
+        # should work in the current configuration, but is not really
+        # portable. Should be improved.
+        address = self.own_ip.split(".")
+        address[2] = address[3] = "0"
+        return ".".join(address) + "/16"
 
     @property
     def interface_idx(self) -> int:
@@ -321,26 +338,27 @@ class LinuxLrpProcess(LrpProcess):
 
     def _netfilter_ensure_is_predecessor(self, predecessor_ip):
         """Ensure this node is known as a predecessor by the firewall."""
-        self._netfilter_non_routable_table.refresh()
-        predecessor_mac = self.get_mac_from_ip(predecessor_ip)
-        # Find the rule corresponding to this predecessor in netfilter
-        for rule in self._netfilter_non_routable_chain.rules:
-            try:
-                if rule.matches[0].mac_source == predecessor_mac:
-                    break
-            except (IndexError, AttributeError):
-                pass
-        # Unable to find it. Add is as predecessor
-        else:
-            rule = iptc.Rule()
-            match = iptc.Match(rule, "mac")
-            match.mac_source = predecessor_mac
-            rule.add_match(match)
-            rule.target = iptc.Target(rule, "ACCEPT")
-            self._netfilter_non_routable_chain.insert_rule(rule)
-            self._predecessors[predecessor_ip] = rule
-            self._netfilter_non_routable_table.commit()
-            self.logger.info("%s is now known as predecessor", predecessor_ip)
+        if not self.is_sink:  # All nodes are predecessors for the sink
+            self._netfilter_non_routable_table.refresh()
+            predecessor_mac = self.get_mac_from_ip(predecessor_ip)
+            # Find the rule corresponding to this predecessor in netfilter
+            for rule in self._netfilter_non_routable_chain.rules:
+                try:
+                    if rule.matches[0].mac_source == predecessor_mac:
+                        break
+                except (IndexError, AttributeError):
+                    pass
+            # Unable to find it. Add is as predecessor
+            else:
+                rule = iptc.Rule()
+                match = iptc.Match(rule, "mac")
+                match.mac_source = predecessor_mac
+                rule.add_match(match)
+                rule.target = iptc.Target(rule, "ACCEPT")
+                self._netfilter_non_routable_chain.insert_rule(rule)
+                self._predecessors[predecessor_ip] = rule
+                self._netfilter_non_routable_table.commit()
+                self.logger.info("%s is now known as predecessor", predecessor_ip)
 
     def _netfilter_ensure_is_destination(self, destination):
         """Ensure this node is known as a host route destination by the firewall."""
