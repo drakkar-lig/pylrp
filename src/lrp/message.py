@@ -131,15 +131,22 @@ class RREQ(Message):
     @classmethod
     def parse(cls, flow):
         searched_node = socket.inet_ntoa(flow[1:5])
-        return cls(searched_node)
+        source = socket.inet_ntoa(flow[5:9])
+        seqno = int.from_bytes(flow[9:11], lrp.conf['endianess'])
+        return cls(searched_node, source, seqno)
 
-    def __init__(self, searched_node):
+    def __init__(self, searched_node, source, seqno):
         self.searched_node = searched_node
+        self.source = source
+        self.seqno = seqno
 
     def dump(self):
         result = b""
         result += socket.inet_aton(self.searched_node)
+        result += socket.inet_aton(self.source)
+        result += self.seqno.to_bytes(2, lrp.conf['endianess'])
         return super().dump() + result
 
     def __str__(self):
-        return "%s <searched_node=%s>" % (self.message_type, self.searched_node)
+        return "%s <searched_node=%s source=%s seqno=%d>" % \
+               (self.message_type, self.searched_node, self.source, self.seqno)

@@ -20,6 +20,8 @@ class LrpProcess(metaclass=abc.ABCMeta):
         else:
             self.sink = None
 
+        self._own_current_seqno = 0
+
     def __enter__(self):
         self.logger.debug("LRP process started")
         if self.is_sink:
@@ -63,6 +65,12 @@ class LrpProcess(metaclass=abc.ABCMeta):
     def get_ip_from_mac(self, mac_address):
         """Return the layer 3 address, given a layer 2 address. Return None if such
         layer 2 address is unknown"""
+
+    def _new_rreq_seqno(self) -> int:
+        self._own_current_seqno += 1
+        if self._own_current_seqno >= 2 ** 16:
+            self._own_current_seqno = 0
+        return self._own_current_seqno
 
     def handle_msg(self, msg, sender, is_broadcast: bool):
         """Handle a LRP message.
@@ -185,7 +193,8 @@ class LrpProcess(metaclass=abc.ABCMeta):
         into the network."""
         assert self.is_sink, "Non-sink nodes does not handle unknown hosts, they use their default route instead"
         self.logger.info("Unknown host %s. Flooding a RREQ to find it", destination)
-        self.send_msg(RREQ(searched_node=destination), destination=None)
+        self.send_msg(RREQ(searched_node=destination, source=self.own_ip, seqno=self._new_rreq_seqno()),
+                      destination=None)
 
     @abc.abstractmethod
     def add_route(self, destination, next_hop, metric):
