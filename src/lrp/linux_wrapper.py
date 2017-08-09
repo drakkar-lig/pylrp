@@ -62,6 +62,11 @@ class LinuxLrpProcess(LrpProcess):
 
         self.logger.debug("Add firewall rule for non-routable packets")
         self._non_routable_rule = iptc.Rule()
+        if self.is_sink:
+            # We are the sink: we expect to have a default route that does not
+            # depend on the LRP network. Allow to use this route, except for
+            # packets destined to the LRP network itself.
+            self._non_routable_rule.dst = self.network_prefix
         self._non_routable_rule.target = iptc.Target(self._non_routable_rule, "NFQUEUE")
         self._non_routable_rule.target.queue_num = str(self.non_routable_queue_nb)
         self._netfilter_non_routable_chain.append_rule(self._non_routable_rule)
@@ -139,6 +144,15 @@ class LinuxLrpProcess(LrpProcess):
                 except IndexError:
                     raise Exception("%s: interface has no IP address" % self.interface)
             return self._own_ip
+
+    @property
+    def network_prefix(self):
+        # TODO: we currently do not manage any network prefix. This below
+        # should work in the current configuration, but is not really
+        # portable. Should be improved.
+        address = self.own_ip.split(".")
+        address[2] = address[3] = "0"
+        return ".".join(address) + "/16"
 
     @property
     def interface_idx(self) -> int:
