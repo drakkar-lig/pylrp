@@ -20,6 +20,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         else:
             self.sink = None
 
+        self._tracked_rreq = {}
         self._own_current_seqno = 0
 
     def __enter__(self):
@@ -176,6 +177,34 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 else:
                     self.logger.info("Forward RERR")
                     self.send_msg(rerr, destination=next_hop)
+
+    def _handle_RREQ(self, rreq, sender, is_broadcast):
+        # Throw out our messages
+        if rreq.source == self.own_ip:
+            self.logger.debug("Skip RREQ: it is mine")
+        else:
+            # Track RREQ seqnos
+            try:
+                old_seqno = self._tracked_rreq[rreq.source]
+            except KeyError:
+                # We do not have seqno for rreq.source. Accept this one.
+                old_seqno = -1  # Does not really exist, but is below all seqnos
+            if old_seqno >= rreq.seqno:
+                self.logger.debug("Skip RREQ: already received")
+            else:
+                self._tracked_rreq[rreq.source] = rreq.seqno
+
+                # Handle the message
+                if rreq.searched_node == self.own_ip:
+                    self.logger.info("We are the searched node. Answer with a RREP")
+                    successor = self.get_nexthop(None)
+                    if successor is None:
+                        self.logger.error("Cannot send RREP: no more successor")
+                    else:
+                        self.send_msg(RREP(source=self.own_ip, destination=rreq.source, hops=0), destination=successor)
+                else:
+                    self.logger.info("Forward RREQ")
+                    self.send_msg(rreq, destination=None)
 
     def handle_non_routable_packet(self, source, destination, sender_mac):
         """Handle non-routable packet: all packets that does not either come from a
