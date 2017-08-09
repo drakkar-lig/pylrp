@@ -35,7 +35,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
-    def own_ip(self) -> str:
+    def own_ip(self):
         """The IP address of this node"""
 
     @abc.abstractmethod

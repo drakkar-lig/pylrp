@@ -125,7 +125,7 @@ class LinuxLrpProcess(LrpProcess):
             self.routes.clear()
 
     @property
-    def own_ip(self) -> str:
+    def own_ip(self):
         try:
             return self._own_ip
         except AttributeError:
