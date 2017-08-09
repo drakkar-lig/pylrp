@@ -138,6 +138,8 @@ class LrpProcess(metaclass=abc.ABCMeta):
         rrep.hops = route_cost
         if rrep.destination == self.own_ip:
             self.logger.debug("RREP has reached its destination")
+        elif self.is_sink:
+            self.logger.warning("Do not forward a RREP through the sink")
         else:
             nexthop = self.get_nexthop(rrep.destination)
             if nexthop is not None:
