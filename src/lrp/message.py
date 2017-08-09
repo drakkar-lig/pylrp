@@ -123,3 +123,23 @@ class RERR(Message):
         return "%s <error_source=%s error_destination=%s>" % \
                (self.message_type, self.error_source, self.error_destination)
 
+
+@Message.record_message_type
+class RREQ(Message):
+    message_type = MessageType.RREQ
+
+    @classmethod
+    def parse(cls, flow):
+        searched_node = socket.inet_ntoa(flow[1:5])
+        return cls(searched_node)
+
+    def __init__(self, searched_node):
+        self.searched_node = searched_node
+
+    def dump(self):
+        result = b""
+        result += socket.inet_aton(self.searched_node)
+        return super().dump() + result
+
+    def __str__(self):
+        return "%s <searched_node=%s>" % (self.message_type, self.searched_node)
