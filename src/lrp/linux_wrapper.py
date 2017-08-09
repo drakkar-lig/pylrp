@@ -6,7 +6,9 @@ import struct
 
 import click
 import iptc
+import logging
 import pyroute2
+from pyroute2.netlink.rtnl import ifinfmsg
 
 import lrp
 from lrp.daemon import LrpProcess
@@ -377,10 +379,26 @@ class LinuxLrpProcess(LrpProcess):
 
 
 @click.command()
-@click.argument("interface")
-@click.argument("metric", default=2 ** 16 - 1)
-@click.option("--sink/--no-sink")
-def daemon(interface, metric, sink=False):
+@click.option("--interface", default=None, metavar="<iface>",
+              help="The interface LRP should use. Default: auto-detect.")
+@click.option("--metric", default=2 ** 16 - 1, metavar="<metric>",
+              help="The initial metric of this node. Should be set for the sink. Default: infinite.")
+@click.option("--sink/--no-sink", default=False, help="Is this node a sink? Default: no.")
+def daemon(interface=None, metric=2 ** 16 - 1, sink=False):
+    """Launch the LRP daemon."""
+    if interface is None:
+        # Guess interface
+        with pyroute2.IPRoute() as ipr:
+            all_interfaces = ipr.get_links()
+        all_interfaces = [iface.get_attr("IFLA_IFNAME") for iface in all_interfaces
+                          if not iface['flags'] & ifinfmsg.IFF_LOOPBACK]  # Filter out loopback
+        if len(all_interfaces) > 1:
+            raise Exception("Unable to auto-detect the interface to use. Please provide --interface argument.")
+        elif len(all_interfaces) == 0:
+            raise Exception("Unable to find a usable interface.")
+        interface = all_interfaces[0]
+        logging.getLogger("LRP").info("Use auto-detected interface %s", interface)
+
     with LinuxLrpProcess(interface, metric=metric, is_sink=sink) as lrp_process:
         lrp_process.wait_event()
 
