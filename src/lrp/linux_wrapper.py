@@ -208,14 +208,24 @@ class LinuxLrpProcess(LrpProcess):
                     route = ipr.get_default_routes()[0]
                 else:
                     route = ipr.route('get', dst=destination)[0]
+
                 nexthop = route.get_attr('RTA_GATEWAY')
                 if nexthop is not None:
                     # We have a route towards this destination
                     return nexthop
+
                 oif = route.get_attr('RTA_OIF')
                 if oif is not None:
                     # The destination is on link, return itself
                     return destination
+
+                multipath = route.get_attr('RTA_MULTIPATH')
+                if multipath is not None:
+                    # The destination has many nexthops. Take the one with less hops
+                    return min(multipath, key=lambda nh: nh['hops']).get_attr('RTA_GATEWAY')
+
+                # We have a route, but its impossible to find the nexthop… Act as if we hadn't any route.
+                return None
         except pyroute2.NetlinkError:
             # No route towards the destination
             return None
