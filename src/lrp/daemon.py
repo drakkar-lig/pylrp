@@ -1,5 +1,6 @@
 import abc
 import logging
+import sched
 
 from lrp.message import RREP, DIO, Message, RERR, RREQ
 
@@ -22,6 +23,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
 
         self._tracked_rreq = {}
         self._own_current_seqno = 0
+        self.scheduler = sched.scheduler()
 
     def __enter__(self):
         self.logger.debug("LRP process started")
