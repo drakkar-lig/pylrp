@@ -2,6 +2,7 @@ import abc
 import logging
 import sched
 
+import lrp
 from lrp.message import RREP, DIO, Message, RERR, RREQ
 
 
@@ -29,9 +30,11 @@ class LrpProcess(metaclass=abc.ABCMeta):
         self.logger.debug("LRP process started")
         if self.is_sink:
             self.logger.debug("Started as sink")
-
-        self.logger.debug("Emit a first DIO to signal our presence")
-        self.send_msg(DIO(self.own_metric, sink=self.sink), destination=None)
+            self.logger.debug("Emit a first DIO to signal our presence")
+            self.send_msg(DIO(self.own_metric, sink=self.sink), destination=None)
+        else:
+            self.logger.debug("Started as standard node")
+            self.disconnected()
 
         return self
 
@@ -244,3 +247,27 @@ class LrpProcess(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def filter_out(self, destination, max_metric: int = None):
         """Filter out some routes, according to some constraints."""
+
+    def disconnected(self):
+        """Should be called whenever the node is detected as disconnected. Handle disconnection by sending regularly
+        DIOs."""
+        assert not self.is_sink, "Sink cannot be disconnected!"
+
+        # Check if we already knows that we are disconnected
+        for event in self.scheduler.queue:
+            if event.action == self.disconnected:
+                self.logger.debug("Disconnection already handled")
+                break
+        else:
+
+            # Check if we are still disconnected
+            successor = self.get_nexthop(None)
+            if successor is not None:
+                self.logger.info("Node is reconnected")
+            else:
+
+                # Handle disconnection
+                self.logger.debug("Trying to connect the DODAG…")
+                self.send_msg(DIO(metric_value=self.own_metric, sink=self.sink), destination=None)
+                # Re-schedule next DIO emission
+                self.scheduler.enter(lrp.conf['dio_reconnect_interval'], 0, action=self.disconnected)
