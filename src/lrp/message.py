@@ -20,9 +20,9 @@ class MessageType(enum.IntEnum):
 
 
 class Message(metaclass=abc.ABCMeta):
+    __slots__ = ("message_type",)
     _message_types = {}
     null_ip_address = "0.0.0.0"
-    message_type = None  # Should be filled by subclasses
 
     @classmethod
     def parse(cls, flow: bytearray):
@@ -45,9 +45,14 @@ class Message(metaclass=abc.ABCMeta):
         Message._message_types[the_class.message_type] = the_class
         return the_class
 
+    def __str__(self):
+        return "%s <%s>" % (self.message_type, " ".join("%s=%r" % (attr_name, self.__getattribute__(attr_name))
+                                                        for attr_name in self.__slots__))
+
 
 @Message.record_message_type
 class DIO(Message):
+    __slots__ = ("metric_value", "sink")
     message_type = MessageType.DIO
 
     @classmethod
@@ -68,12 +73,10 @@ class DIO(Message):
         result += socket.inet_aton(self.sink if self.sink is not None else Message.null_ip_address)
         return super(DIO, self).dump() + result
 
-    def __str__(self):
-        return "%s <metric_value=%d sink=%s>" % (self.__class__.__name__, self.metric_value, self.sink)
-
 
 @Message.record_message_type
 class RREP(Message):
+    __slots__ = ("source", "destination", "hops")
     message_type = MessageType.RREP
 
     @classmethod
@@ -95,12 +98,10 @@ class RREP(Message):
         result += self.hops.to_bytes(2, lrp.conf['endianess'])
         return super(RREP, self).dump() + result
 
-    def __str__(self):
-        return "%s <source=%s destination=%s hops=%d>" % (self.message_type, self.source, self.destination, self.hops)
-
 
 @Message.record_message_type
 class RERR(Message):
+    __slots__ = ("error_source", "error_destination")
     message_type = MessageType.RERR
 
     @classmethod
@@ -119,13 +120,10 @@ class RERR(Message):
         result += socket.inet_aton(self.error_destination)
         return super().dump() + result
 
-    def __str__(self):
-        return "%s <error_source=%s error_destination=%s>" % \
-               (self.message_type, self.error_source, self.error_destination)
-
 
 @Message.record_message_type
 class RREQ(Message):
+    __slots__ = ("searched_node", "source", "seqno")
     message_type = MessageType.RREQ
 
     @classmethod
@@ -146,7 +144,3 @@ class RREQ(Message):
         result += socket.inet_aton(self.source)
         result += self.seqno.to_bytes(2, lrp.conf['endianess'])
         return super().dump() + result
-
-    def __str__(self):
-        return "%s <searched_node=%s source=%s seqno=%d>" % \
-               (self.message_type, self.searched_node, self.source, self.seqno)
