@@ -243,7 +243,7 @@ class LinuxLrpProcess(LrpProcess):
 
                 # We have a route, but its impossible to find the nexthop… Act as if we hadn't any route.
                 return None
-        except pyroute2.NetlinkError:
+        except (pyroute2.NetlinkError, IndexError):
             # No route towards the destination
             return None
 
