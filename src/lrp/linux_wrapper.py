@@ -169,17 +169,27 @@ class LinuxLrpProcess(LrpProcess):
 
     def wait_event(self):
         while True:
-            rr, _, _ = select.select([self.input_multicast_socket, self.unicast_socket, self._non_routables_socket], [],
-                                     [])
-            if rr[0] is self._non_routables_socket:
-                self.non_routables_queue.run(block=False)
-            else:
-                data, (sender, _) = rr[0].recvfrom(16)
-                if sender == self.own_ip:
-                    self.logger.debug("Skip a message from ourselves")  # Happen on broadcast messages
-                    continue
-                msg = Message.parse(data)
-                self.handle_msg(msg, sender, is_broadcast=rr[0] is self.input_multicast_socket)
+            # Handle timers
+            next_time_event = self.scheduler.run(blocking=False)
+            # Handle socket input, but stop when next time event occurs
+            rr, _, _ = select.select([self.input_multicast_socket, self.unicast_socket, self._non_routables_socket],
+                                     [], [], next_time_event)
+            try:
+                # Handle packet from socket
+                readable_socket = rr[0]
+                if readable_socket is self._non_routables_socket:
+                    self.non_routables_queue.run(block=False)
+                else:
+                    data, (sender, _) = readable_socket.recvfrom(16)
+                    if sender == self.own_ip:
+                        self.logger.debug("Skip a message from ourselves")  # Happen on broadcast messages
+                    else:
+                        msg = Message.parse(data)
+                        self.handle_msg(msg, sender, is_broadcast=(readable_socket is self.input_multicast_socket))
+            except IndexError:
+                # No available readable socket. Select timed out. We have no new packet, but a timed event needs to
+                # be activated. Loop.
+                pass
 
     def send_msg(self, msg: Message, destination=None):
         if destination is None:
