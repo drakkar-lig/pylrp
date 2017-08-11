@@ -4,5 +4,6 @@ conf = {
     'service_port': 6666,
 
     # Interval in s between DIO emission, when the node is disconnected.
-    'dio_reconnect_interval': 10
+    'dio_reconnect_interval': 10,
+    'dio_delay': 1
 }

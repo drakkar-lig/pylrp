@@ -1,6 +1,7 @@
 import abc
 import logging
 import sched
+import random
 
 import lrp
 from lrp.message import RREP, DIO, Message, RERR, RREQ
@@ -9,6 +10,8 @@ from lrp.tools import Address, Subnet, NULL_ADDRESS, DEFAULT_ROUTE
 
 class LrpProcess(metaclass=abc.ABCMeta):
     logger = logging.getLogger("LRP")
+
+    dest_next_DIO = None
 
     def __init__(self, metric: int = 2 ** 16 - 1, is_sink: bool = False):
         """Constructor.
@@ -109,7 +112,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             self.logger.debug("Do not use DIO: route is too bad")
             if self.own_metric + 2 < route_cost:
                 self.logger.info("Neighbor may be interested by our DIO")
-                self.send_msg(DIO(self.own_metric, sink=self.sink), destination=None)
+                self._schedule_DIO(dest_for_DIO=None) #Mh Ça devrait pas être un unicast là ?
 
         else:
             self.logger.debug("Neighbor %s is an acceptable successor", sender)
@@ -133,12 +136,31 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 self.filter_out(DEFAULT_ROUTE, max_metric=self.own_metric + 1)
 
                 self.logger.debug("Inform neighbors that we have changed our metric")
-                self.send_msg(DIO(self.own_metric, sink=self.sink), destination=None)
+                self._schedule_DIO(dest_for_DIO=None)
 
             if not was_already_successor:
                 # This neighbor does not know us as predecessor. Send RREP
                 self.logger.info("Create host route through %s" % sender)
                 self.send_msg(RREP(self.own_ip, self.sink, 0), destination=sender)
+
+    def _schedule_DIO(self,dest_for_DIO):
+        # If a DIO is scheduled and it is unicast, switch to bcast
+        if self.dest_next_DIO != None and self.dest_next_DIO != dest_for_DIO:
+            self.dest_next_DIO = None
+        self.dest_next_DIO = dest_for_DIO
+        for event in self.scheduler.queue:
+            if event.action == self._schedule_DIO:
+                self.logger.debug("DIO already programmed")
+                break
+        else:
+            random_delay=random.random()*lrp.conf['dio_delay']
+            self.logger.debug("Programming DIO in %s s",random_delay)
+            self.scheduler.enter(random_delay, 0, action=self._send_DIO)
+
+    def _send_DIO(self):
+        self.send_msg(DIO(metric_value=self.own_metric, sink=self.sink), destination=self.dest_next_DIO)
+        # Revert to default sending bcast
+        dest_next_DIO = None
 
     def _handle_RREP(self, rrep: RREP, sender: Address, is_broadcast: bool):
         assert not is_broadcast, "Broadcast RREP are unacceptable"
