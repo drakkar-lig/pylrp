@@ -71,11 +71,6 @@ class LrpProcess(metaclass=abc.ABCMeta):
         """Get a next_hop towards a `destination`. If `destination` is None, get a
         successor. If there is no such next hop, return None"""
 
-    @abc.abstractmethod
-    def get_ip_from_mac(self, mac_address) -> Address:
-        """Return the layer 3 address, given a layer 2 address. Return None if such
-        layer 2 address is unknown"""
-
     def _new_rreq_seqno(self) -> int:
         self._own_current_seqno += 1
         if self._own_current_seqno >= 2 ** 16:
@@ -234,16 +229,12 @@ class LrpProcess(metaclass=abc.ABCMeta):
                     self.logger.info("Forward RREQ")
                     self.send_msg(rreq, destination=None)
 
-    def handle_non_routable_packet(self, source: Address, destination: Address, sender_mac):
+    def handle_non_routable_packet(self, source: Address, destination: Address, sender: Address):
         """Handle non-routable packet: all packets that does not either come from a
         predecessor or follow a host route."""
         assert not self.is_sink, "The sink should be able to route any packet"
-        self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender_mac, destination)
-        sender_ip = self.get_ip_from_mac(sender_mac)
-        if sender_ip is not None:
-            self.send_msg(RERR(error_source=source, error_destination=destination), destination=sender_ip)
-        else:
-            self.logger.warning("Unable to warn about unreachable destination: unknown previous hop %s", sender_mac)
+        self.logger.warning("Drop a non-routable packet: %s --(%s)--> %s", source, sender, destination)
+        self.send_msg(RERR(error_source=source, error_destination=destination), destination=sender)
 
     def handle_unknown_host(self, destination: Address):
         """Handle the situation when the sink do not have a host route towards a node

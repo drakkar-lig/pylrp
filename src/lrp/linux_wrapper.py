@@ -85,7 +85,7 @@ class LinuxLrpProcess(LrpProcess):
             else:
                 source = socket.inet_ntoa(payload[12:16])
                 sender = ":".join(["%02x" % b for b in packet.get_hw()[0:6]])
-                self.handle_non_routable_packet(source, destination, sender)
+                self.handle_non_routable_packet(source, destination, self.get_ip_from_mac(sender))
             packet.drop()
 
         self.non_routables_queue.bind(self.non_routable_queue_nb, queue_packet_handler)
@@ -273,6 +273,8 @@ class LinuxLrpProcess(LrpProcess):
             return False
 
     def get_mac_from_ip(self, ip_address: Address):
+        """Return the layer 2 address, given a layer 3 address. Return None if such
+        address is unknown"""
         try:
             with pyroute2.IPRoute() as ipr:
                 return ipr.neigh("dump", dst=str(ip_address))[0].get_attr('NDA_LLADDR').upper()
@@ -281,6 +283,8 @@ class LinuxLrpProcess(LrpProcess):
             return None
 
     def get_ip_from_mac(self, mac_address) -> Optional[Address]:
+        """Return the layer 3 address, given a layer 2 address. Return None if such
+        layer 2 address is unknown"""
         try:
             with pyroute2.IPRoute() as ipr:
                 return Address(ipr.neigh("dump", lladdr=mac_address.lower())[0].get_attr('NDA_DST'))
