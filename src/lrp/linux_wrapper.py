@@ -377,7 +377,7 @@ class LinuxLrpProcess(LrpProcess):
 
         # If the neighbor is 'on link', (i.e. directly accessible), we do not need to change anything, the best choice
         # will always be to send the packet to itself.
-        if self.is_neighbor(destination):
+        if self.routing_table.is_neighbor(destination):
             return
 
         # Drop route if it exists
