@@ -12,7 +12,7 @@ class Address:
                 raise Exception("Unsupported address length for %r" % address)
             self.as_bytes = address
         else:
-            raise Exception("Unsupported address type: %s" % type(address))
+            raise TypeError("Unsupported address type: %s" % type(address))
 
     def __eq__(self, other):
         return isinstance(other, Address) and self.as_bytes == other.as_bytes
