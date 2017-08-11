@@ -130,7 +130,10 @@ class LinuxLrpProcess(LrpProcess):
             # Drop all routes inserted by LRP in the kernel routing table
             for destination in self.routes:
                 self.logger.debug("Clean route towards %s", destination)
-                ipdb.routes[destination].remove().commit()
+                try:
+                    ipdb.routes[str(destination)].remove().commit()
+                except KeyError:
+                    self.logger.warning("Route towards %s has already been dropped…", destination)
             self.routes.clear()
 
     @property
