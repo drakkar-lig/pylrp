@@ -58,7 +58,7 @@ class DIO(Message):
     @classmethod
     def parse(cls, flow):
         metric_value = int.from_bytes(flow[1:3], lrp.conf['endianess'])
-        sink = socket.inet_ntoa(flow[3:8])
+        sink = socket.inet_ntoa(flow[3:7])
         if sink == Message.null_ip_address:
             sink = None
         return cls(metric_value, sink)
