@@ -254,7 +254,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         DIOs."""
         assert not self.is_sink, "Sink cannot be disconnected!"
 
-        # Check if we already knows that we are disconnected
+        # Check if we already know that we are disconnected
         for event in self.scheduler.queue:
             if event.action == self.disconnected:
                 self.logger.debug("Disconnection already handled")
@@ -264,7 +264,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             # Check if we are still disconnected
             successor = self.get_nexthop(None)
             if successor is not None:
-                self.logger.info("Node is reconnected")
+                self.logger.info("Node is reconnected to %s", successor)
             else:
 
                 # Handle disconnection
