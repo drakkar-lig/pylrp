@@ -1,8 +1,8 @@
 import abc
 import enum
-import socket
 
 import lrp
+from lrp.tools import Address
 
 
 class MessageType(enum.IntEnum):
@@ -46,7 +46,7 @@ class Message(metaclass=abc.ABCMeta):
         return the_class
 
     def __str__(self):
-        return "%s <%s>" % (self.message_type, " ".join("%s=%r" % (attr_name, self.__getattribute__(attr_name))
+        return "%s <%s>" % (self.message_type, " ".join("%s=%s" % (attr_name, self.__getattribute__(attr_name))
                                                         for attr_name in self.__slots__))
 
 
@@ -58,9 +58,7 @@ class DIO(Message):
     @classmethod
     def parse(cls, flow):
         metric_value = int.from_bytes(flow[1:3], lrp.conf['endianess'])
-        sink = socket.inet_ntoa(flow[3:7])
-        if sink == Message.null_ip_address:
-            sink = None
+        sink = Address(flow[3:7])
         return cls(metric_value, sink)
 
     def __init__(self, metric_value, sink):
@@ -70,7 +68,7 @@ class DIO(Message):
     def dump(self):
         result = b""
         result += self.metric_value.to_bytes(2, lrp.conf['endianess'])
-        result += socket.inet_aton(self.sink if self.sink is not None else Message.null_ip_address)
+        result += self.sink.as_bytes
         return super(DIO, self).dump() + result
 
 
@@ -81,8 +79,8 @@ class RREP(Message):
 
     @classmethod
     def parse(cls, flow):
-        source = socket.inet_ntoa(flow[1:5])
-        destination = socket.inet_ntoa(flow[5:9])
+        source = Address(flow[1:5])
+        destination = Address(flow[5:9])
         hops = int.from_bytes(flow[9:11], lrp.conf['endianess'])
         return cls(source, destination, hops)
 
@@ -93,8 +91,8 @@ class RREP(Message):
 
     def dump(self):
         result = b""
-        result += socket.inet_aton(self.source)
-        result += socket.inet_aton(self.destination if self.destination is not None else Message.null_ip_address)
+        result += self.source.as_bytes
+        result += self.destination.as_bytes
         result += self.hops.to_bytes(2, lrp.conf['endianess'])
         return super(RREP, self).dump() + result
 
@@ -106,8 +104,8 @@ class RERR(Message):
 
     @classmethod
     def parse(cls, flow):
-        error_source = socket.inet_ntoa(flow[1:5])
-        error_destination = socket.inet_ntoa(flow[5:9])
+        error_source = Address(flow[1:5])
+        error_destination = Address(flow[5:9])
         return cls(error_source, error_destination)
 
     def __init__(self, error_source, error_destination):
@@ -116,8 +114,8 @@ class RERR(Message):
 
     def dump(self):
         result = b""
-        result += socket.inet_aton(self.error_source)
-        result += socket.inet_aton(self.error_destination)
+        result += self.error_source.as_bytes
+        result += self.error_destination.as_bytes
         return super().dump() + result
 
 
@@ -128,8 +126,8 @@ class RREQ(Message):
 
     @classmethod
     def parse(cls, flow):
-        searched_node = socket.inet_ntoa(flow[1:5])
-        source = socket.inet_ntoa(flow[5:9])
+        searched_node = Address(flow[1:5])
+        source = Address(flow[5:9])
         seqno = int.from_bytes(flow[9:11], lrp.conf['endianess'])
         return cls(searched_node, source, seqno)
 
@@ -140,7 +138,7 @@ class RREQ(Message):
 
     def dump(self):
         result = b""
-        result += socket.inet_aton(self.searched_node)
-        result += socket.inet_aton(self.source)
+        result += self.searched_node.as_bytes
+        result += self.source.as_bytes
         result += self.seqno.to_bytes(2, lrp.conf['endianess'])
         return super().dump() + result

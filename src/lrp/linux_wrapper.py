@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import netfilterqueue
 import select
 import socket
@@ -6,13 +7,13 @@ import struct
 
 import click
 import iptc
-import logging
 import pyroute2
 from pyroute2.netlink.rtnl import ifinfmsg
 
 import lrp
 from lrp.daemon import LrpProcess
 from lrp.message import Message
+from lrp.tools import Address, Subnet, DEFAULT_ROUTE
 
 
 class LinuxLrpProcess(LrpProcess):
@@ -40,7 +41,7 @@ class LinuxLrpProcess(LrpProcess):
         self.logger.debug("Initialize output multicast socket ([%s]:%d)",
                           lrp.conf['service_multicast_address'], lrp.conf['service_port'])
         self.output_multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self.output_multicast_socket.bind((self.own_ip, 0))
+        self.output_multicast_socket.bind((str(self.own_ip), 0))
         self.output_multicast_socket.connect((lrp.conf['service_multicast_address'], lrp.conf['service_port']))
 
         self.logger.debug("Initialize input multicast socket ([%s]:%d)",
@@ -52,7 +53,7 @@ class LinuxLrpProcess(LrpProcess):
 
         self.logger.debug("Initialize unicast socket ([%s]:%d)", iface_address, lrp.conf['service_port'])
         self.unicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self.unicast_socket.bind((self.own_ip, lrp.conf['service_port']))
+        self.unicast_socket.bind((str(self.own_ip), lrp.conf['service_port']))
 
         # Initialize netfilter
         self._netfilter_non_routable_table = iptc.Table(iptc.Table.FILTER)
@@ -66,7 +67,7 @@ class LinuxLrpProcess(LrpProcess):
             # We are the sink: we expect to have a default route that does not
             # depend on the LRP network. Allow to use this route, except for
             # packets destined to the LRP network itself.
-            self._non_routable_rule.dst = self.network_prefix
+            self._non_routable_rule.dst = str(self.network_prefix)
         self._non_routable_rule.target = iptc.Target(self._non_routable_rule, "NFQUEUE")
         self._non_routable_rule.target.queue_num = str(self.non_routable_queue_nb)
         self._netfilter_non_routable_chain.append_rule(self._non_routable_rule)
@@ -140,7 +141,7 @@ class LinuxLrpProcess(LrpProcess):
             # _own_ip was never computed
             with pyroute2.IPRoute() as ip:
                 try:
-                    self._own_ip = ip.get_addr(index=self.interface_idx)[0].get_attr('IFA_ADDRESS')
+                    self._own_ip = Address(ip.get_addr(index=self.interface_idx)[0].get_attr('IFA_ADDRESS'))
                 except IndexError:
                     raise Exception("%s: interface has no IP address" % self.interface)
             return self._own_ip
@@ -150,9 +151,8 @@ class LinuxLrpProcess(LrpProcess):
         # TODO: we currently do not manage any network prefix. This below
         # should work in the current configuration, but is not really
         # portable. Should be improved.
-        address = self.own_ip.split(".")
-        address[2] = address[3] = "0"
-        return ".".join(address) + "/16"
+        prefix = Subnet(self.own_ip.as_bytes[0:2] + b"\x00\x00", prefix=16)
+        return prefix
 
     @property
     def interface_idx(self) -> int:
@@ -181,6 +181,7 @@ class LinuxLrpProcess(LrpProcess):
                     self.non_routables_queue.run(block=False)
                 else:
                     data, (sender, _) = readable_socket.recvfrom(16)
+                    sender = Address(sender)
                     if sender == self.own_ip:
                         self.logger.debug("Skip a message from ourselves")  # Happen on broadcast messages
                     else:
@@ -197,14 +198,14 @@ class LinuxLrpProcess(LrpProcess):
             self.output_multicast_socket.send(msg.dump())
         else:
             self.logger.info("Send %s to %s", msg, destination)
-            self.unicast_socket.sendto(msg.dump(), (destination, lrp.conf['service_port']))
+            self.unicast_socket.sendto(msg.dump(), (str(destination), lrp.conf['service_port']))
 
     def ensure_is_neighbor(self, address):
-        address += "/32"
+        address_with_prefix = address.as_subnet()
         with pyroute2.IPDB() as ipdb:
-            if address not in ipdb.routes:
+            if address_with_prefix not in ipdb.routes:
                 self.logger.info("Adding %s as neighbor" % address)
-                ipdb.routes.add(dst=address, oif=self.interface_idx,
+                ipdb.routes.add(dst=address_with_prefix, oif=self.interface_idx,
                                 scope=pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK'],
                                 proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC']) \
                     .commit()
@@ -212,7 +213,7 @@ class LinuxLrpProcess(LrpProcess):
     def is_successor(self, nexthop):
         # Check the routes that LRP knows
         try:
-            if nexthop in self.routes['default']:
+            if nexthop in self.routes[DEFAULT_ROUTE]:
                 return True
         except KeyError:
             # No default route known by LRP. Continue...
@@ -220,10 +221,10 @@ class LinuxLrpProcess(LrpProcess):
         # Check if the system knows one default route we don't know
         with pyroute2.IPDB() as ipdb:
             for route in ipdb.routes.filter({'dst': "default"}):
-                if nexthop == route['route']['gateway']:
+                if str(nexthop) == route['route']['gateway']:
                     return True
                 for nh in route['route']['multipath']:
-                    if nexthop == nh['gateway']:
+                    if str(nexthop) == nh['gateway']:
                         return True
         # Unable to find this neighbor in any default route. It is not a successor.
         return False
@@ -234,7 +235,7 @@ class LinuxLrpProcess(LrpProcess):
                 if destination is None:
                     route = ipr.get_default_routes()[0]
                 else:
-                    route = ipr.route('get', dst=destination)[0]
+                    route = ipr.route('get', dst=str(destination))[0]
 
                 nexthop = route.get_attr('RTA_GATEWAY')
                 if nexthop is not None:
@@ -260,14 +261,9 @@ class LinuxLrpProcess(LrpProcess):
     def is_neighbor(self, address) -> bool:
         """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`, the neighbor is not added if it
         was not known."""
-
-        if '/' not in address:
-            # Suppose it is a host route
-            address += "/32"
-
         try:
             with pyroute2.IPDB() as ipdb:
-                return ipdb.routes[address]['scope'] == pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK']
+                return ipdb.routes[address.as_subnet()]['scope'] == pyroute2.netlink.rtnl.rt_scope['link']
         except KeyError:
             # address is unknown, it is certainly not a neighbor
             return False
@@ -275,7 +271,7 @@ class LinuxLrpProcess(LrpProcess):
     def get_mac_from_ip(self, ip_address):
         try:
             with pyroute2.IPRoute() as ipr:
-                return ipr.neigh("dump", dst=ip_address)[0].get_attr('NDA_LLADDR').upper()
+                return ipr.neigh("dump", dst=str(ip_address))[0].get_attr('NDA_LLADDR').upper()
         except IndexError:
             # Unknown IP address
             return None
@@ -283,41 +279,27 @@ class LinuxLrpProcess(LrpProcess):
     def get_ip_from_mac(self, mac_address):
         try:
             with pyroute2.IPRoute() as ipr:
-                return ipr.neigh("dump", lladdr=mac_address.lower())[0].get_attr('NDA_DST')
+                return Address(ipr.neigh("dump", lladdr=mac_address.lower())[0].get_attr('NDA_DST'))
         except IndexError:
             # Unknown MAC address
             return None
 
     def add_route(self, destination, next_hop, metric):
-        # Get real destination
-        if destination is None or destination == "0.0.0.0/0":
-            destination = "default"
-        elif '/' not in destination:
-            # Suppose it is a host route
-            destination += "/32"
-
         # Update the routing table
         try:
             self.routes[destination][next_hop] = metric
         except KeyError:
             # Destination was unknown
             self.routes[destination] = {next_hop: metric}
-            if destination != "default":
+            if destination != DEFAULT_ROUTE:
                 self._netfilter_ensure_is_destination(destination)
 
         # Synchronize netlink and netfilter
         self._netlink_update_route(destination)
-        if destination != "default":
+        if destination != DEFAULT_ROUTE:
             self._netfilter_ensure_is_predecessor(next_hop)
 
     def del_route(self, destination, next_hop):
-        # Get real destination
-        if destination is None or destination == "0.0.0.0/0":
-            destination = "default"
-        elif '/' not in destination:
-            # Suppose it is a host route
-            destination += "/32"
-
         # Update the routing table
         try:
             del self.routes[destination][next_hop]
@@ -329,11 +311,6 @@ class LinuxLrpProcess(LrpProcess):
         self._netlink_update_route(destination)
 
     def filter_out(self, destination, max_metric: int = None):
-        """Filter out some routes, according to some constraints."""
-
-        if destination is None:
-            destination = "default"
-
         route = self.routes[destination]
         changed = False
         for next_hop in list(self.routes[destination].keys()):
@@ -379,7 +356,7 @@ class LinuxLrpProcess(LrpProcess):
                 break
         else:
             rule = iptc.Rule()
-            rule.dst = destination
+            rule.dst = str(destination)
             rule.target = iptc.Target(rule, "ACCEPT")
             self._netfilter_non_routable_chain.insert_rule(rule)
             self._hr_destinations[destination] = rule
@@ -399,7 +376,7 @@ class LinuxLrpProcess(LrpProcess):
         with pyroute2.IPDB() as ipdb:
             try:
                 self.logger.debug("Drop old route towards '%s'", destination)
-                ipdb.routes[destination].remove().commit()
+                ipdb.routes[str(destination)].remove().commit()
             except KeyError:
                 # No such route, ok.
                 pass
@@ -407,10 +384,11 @@ class LinuxLrpProcess(LrpProcess):
             # Recreate the route
             try:
                 if len(self.routes[destination]) != 0:
-                    multipath = [{'gateway': key, 'hops': value} for key, value in self.routes[destination].items()]
-                    self.logger.info("Updating routing table: next hops for '%s' are %r", destination,
-                                     self.routes[destination])
-                    ipdb.routes.add(dst=destination, multipath=multipath).commit()
+                    multipath = [{'gateway': str(nh), 'hops': metric}
+                                 for nh, metric in self.routes[destination].items()]
+                    self.logger.info("Updating routing table: next hops for %s are {%s}", destination,
+                                     ", ".join(map(str, self.routes[destination])))
+                    ipdb.routes.add(dst=str(destination), multipath=multipath).commit()
             except KeyError:
                 # No such route, don't need to insert it. Ok.
                 pass

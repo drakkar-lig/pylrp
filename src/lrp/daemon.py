@@ -4,6 +4,7 @@ import sched
 
 import lrp
 from lrp.message import RREP, DIO, Message, RERR, RREQ
+from lrp.tools import Address, Subnet, NULL_ADDRESS, DEFAULT_ROUTE
 
 
 class LrpProcess(metaclass=abc.ABCMeta):
@@ -20,7 +21,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         if self.is_sink:
             self.sink = self.own_ip
         else:
-            self.sink = None
+            self.sink = NULL_ADDRESS
 
         self._tracked_rreq = {}
         self._own_current_seqno = 0
@@ -101,10 +102,10 @@ class LrpProcess(metaclass=abc.ABCMeta):
         route_cost = dio.metric_value + 1
 
         # Check if this sink is supported
-        if dio.sink is not None and self.sink is not None and dio.sink != self.sink:
+        if dio.sink != NULL_ADDRESS and self.sink != NULL_ADDRESS and dio.sink != self.sink:
             self.logger.warning("Drop DIO: not the same sink (many sinks are not handled now)")
 
-        elif dio.sink is None or self.own_metric < route_cost:
+        elif dio.sink == NULL_ADDRESS or self.own_metric < route_cost:
             self.logger.debug("Do not use DIO: route is too bad")
             if self.own_metric + 2 < route_cost:
                 self.logger.info("Neighbor may be interested by our DIO")
@@ -115,7 +116,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             was_already_successor = self.is_successor(sender)
 
             # Add route
-            self.add_route(None, sender, route_cost)
+            self.add_route(DEFAULT_ROUTE, sender, route_cost)
 
             # Update position in the DODAG
             if self.own_metric > route_cost:
@@ -123,13 +124,13 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 self.own_metric = route_cost
 
                 if self.sink != dio.sink:
-                    assert self.sink is None, \
+                    assert self.sink == NULL_ADDRESS, \
                         "Trying to change the sink we are attached to (%s -> %s)" % (self.sink, dio.sink)
                     self.logger.info("Update our sink to %s", dio.sink)
                     self.sink = dio.sink
 
                 self.logger.debug("Check if old successors are still usable")
-                self.filter_out(destination=None, max_metric=self.own_metric + 1)
+                self.filter_out(DEFAULT_ROUTE, max_metric=self.own_metric + 1)
 
                 self.logger.debug("Inform neighbors that we have changed our metric")
                 self.send_msg(DIO(self.own_metric, sink=self.sink), destination=None)
@@ -146,7 +147,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         # between here and the sender
         route_cost = rrep.hops + 1
 
-        self.add_route(rrep.source, sender, route_cost)
+        self.add_route(Subnet(rrep.source), sender, route_cost)
 
         # Update and forward RREP
         rrep.hops = route_cost
@@ -170,7 +171,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             self.send_msg(RREP(source=self.own_ip, destination=self.sink, hops=0), destination=sender)
         else:
             # Remove host route towards the unreachable destination
-            self.del_route(rerr.error_destination, sender)
+            self.del_route(Subnet(rerr.error_destination), sender)
 
             if self.get_nexthop(rerr.error_destination) is not None:
                 self.logger.info("Drop RERR: we still have a route towards %s", rerr.error_destination)
