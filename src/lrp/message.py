@@ -22,7 +22,6 @@ class MessageType(enum.IntEnum):
 class Message(metaclass=abc.ABCMeta):
     __slots__ = ("message_type",)
     _message_types = {}
-    null_ip_address = "0.0.0.0"
 
     @classmethod
     def parse(cls, flow: bytearray):
