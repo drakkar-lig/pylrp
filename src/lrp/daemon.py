@@ -44,11 +44,11 @@ class LrpProcess(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
-    def own_ip(self):
+    def own_ip(self) -> Address:
         """The IP address of this node"""
 
     @abc.abstractmethod
-    def send_msg(self, msg: Message, destination=None):
+    def send_msg(self, msg: Message, destination: Address = None):
         """Send a LRP message to a node.
 
         msg: the Message to be sent
@@ -56,20 +56,20 @@ class LrpProcess(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def ensure_is_neighbor(self, address):
+    def ensure_is_neighbor(self, address: Address):
         """Check if neighbor is declared. If it is not, add it as neighbor."""
 
     @abc.abstractmethod
-    def is_successor(self, address):
+    def is_successor(self, address: Address) -> bool:
         """Check if a node is known as a successor."""
 
     @abc.abstractmethod
-    def get_nexthop(self, destination=None):
+    def get_nexthop(self, destination: Address = None) -> Address:
         """Get a next_hop towards a `destination`. If `destination` is None, get a
         successor. If there is no such next hop, return None"""
 
     @abc.abstractmethod
-    def get_ip_from_mac(self, mac_address):
+    def get_ip_from_mac(self, mac_address) -> Address:
         """Return the layer 3 address, given a layer 2 address. Return None if such
         layer 2 address is unknown"""
 
@@ -79,7 +79,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             self._own_current_seqno = 0
         return self._own_current_seqno
 
-    def handle_msg(self, msg, sender, is_broadcast: bool):
+    def handle_msg(self, msg: Message, sender: Address, is_broadcast: bool):
         """Handle a LRP message.
 
         msg: the parsed message
@@ -97,7 +97,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             self.ensure_is_neighbor(sender)
             handler(msg, sender, is_broadcast)
 
-    def _handle_DIO(self, dio, sender, is_broadcast):
+    def _handle_DIO(self, dio: DIO, sender: Address, is_broadcast: bool):
         # Compute real route cost
         route_cost = dio.metric_value + 1
 
@@ -140,7 +140,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 self.logger.info("Create host route through %s" % sender)
                 self.send_msg(RREP(self.own_ip, self.sink, 0), destination=sender)
 
-    def _handle_RREP(self, rrep, sender, is_broadcast):
+    def _handle_RREP(self, rrep: RREP, sender: Address, is_broadcast: bool):
         assert not is_broadcast, "Broadcast RREP are unacceptable"
 
         # Real route cost: msg.hops is only the distance between the sender and the destination, without the link
@@ -165,7 +165,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             else:
                 self.logger.error("Unable to forward %s: no route towards %s", rrep.message_type, rrep.destination)
 
-    def _handle_RERR(self, rerr, sender, is_broadcast):
+    def _handle_RERR(self, rerr: RERR, sender: Address, is_broadcast: bool):
         if self.is_successor(sender):
             self.logger.info("Inform %s that we are its predecessor", sender)
             self.send_msg(RREP(source=self.own_ip, destination=self.sink, hops=0), destination=sender)
@@ -184,7 +184,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
                     self.logger.info("Forward RERR")
                     self.send_msg(rerr, destination=next_hop)
 
-    def _handle_RREQ(self, rreq, sender, is_broadcast):
+    def _handle_RREQ(self, rreq: RREQ, sender: Address, is_broadcast: bool):
         # Throw out our messages
         if rreq.source == self.own_ip:
             self.logger.debug("Skip RREQ: it is mine")
@@ -212,7 +212,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
                     self.logger.info("Forward RREQ")
                     self.send_msg(rreq, destination=None)
 
-    def handle_non_routable_packet(self, source, destination, sender_mac):
+    def handle_non_routable_packet(self, source: Address, destination: Address, sender_mac):
         """Handle non-routable packet: all packets that does not either come from a
         predecessor or follow a host route."""
         assert not self.is_sink, "The sink should be able to route any packet"
@@ -223,7 +223,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         else:
             self.logger.warning("Unable to warn about unreachable destination: unknown previous hop %s", sender_mac)
 
-    def handle_unknown_host(self, destination):
+    def handle_unknown_host(self, destination: Address):
         """Handle the situation when the sink do not have a host route towards a node
         into the network."""
         assert self.is_sink, "Non-sink nodes does not handle unknown hosts, they use their default route instead"
@@ -232,7 +232,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
                       destination=None)
 
     @abc.abstractmethod
-    def add_route(self, destination, next_hop, metric):
+    def add_route(self, destination: Subnet, next_hop: Address, metric: int):
         """Add a route to `destination`, through `next_hop`, with cost `metric`. If a
         route with the same destination/next_hop already exists, it is erased
         by the new one. If a route with the same destination but with another
@@ -240,13 +240,13 @@ class LrpProcess(metaclass=abc.ABCMeta):
         is None, it is the default route."""
 
     @abc.abstractmethod
-    def del_route(self, destination, next_hop):
+    def del_route(self, destination: Subnet, next_hop: Address):
         """Delete the route to `destination`, through `next_hop`. If a route with the
         same destination but with another next_hop exists, the other one
         continues to exist. If `destination` is None, it is the default route."""
 
     @abc.abstractmethod
-    def filter_out(self, destination, max_metric: int = None):
+    def filter_out(self, destination: Subnet, max_metric: int = None):
         """Filter out some routes, according to some constraints."""
 
     def disconnected(self):

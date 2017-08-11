@@ -4,6 +4,7 @@ import netfilterqueue
 import select
 import socket
 import struct
+from typing import Optional
 
 import click
 import iptc
@@ -137,7 +138,7 @@ class LinuxLrpProcess(LrpProcess):
             self.routes.clear()
 
     @property
-    def own_ip(self):
+    def own_ip(self) -> Address:
         try:
             return self._own_ip
         except AttributeError:
@@ -150,7 +151,7 @@ class LinuxLrpProcess(LrpProcess):
             return self._own_ip
 
     @property
-    def network_prefix(self):
+    def network_prefix(self) -> Subnet:
         # TODO: we currently do not manage any network prefix. This below
         # should work in the current configuration, but is not really
         # portable. Should be improved.
@@ -195,7 +196,7 @@ class LinuxLrpProcess(LrpProcess):
                 # be activated. Loop.
                 pass
 
-    def send_msg(self, msg: Message, destination=None):
+    def send_msg(self, msg: Message, destination: Address = None):
         if destination is None:
             self.logger.info("Send %s (multicast)", msg)
             self.output_multicast_socket.send(msg.dump())
@@ -203,7 +204,7 @@ class LinuxLrpProcess(LrpProcess):
             self.logger.info("Send %s to %s", msg, destination)
             self.unicast_socket.sendto(msg.dump(), (str(destination), lrp.conf['service_port']))
 
-    def ensure_is_neighbor(self, address):
+    def ensure_is_neighbor(self, address: Address):
         address_with_prefix = address.as_subnet()
         with pyroute2.IPDB() as ipdb:
             if address_with_prefix not in ipdb.routes:
@@ -213,7 +214,7 @@ class LinuxLrpProcess(LrpProcess):
                                 proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC']) \
                     .commit()
 
-    def is_successor(self, nexthop):
+    def is_successor(self, nexthop: Address) -> bool:
         # Check the routes that LRP knows
         try:
             if nexthop in self.routes[DEFAULT_ROUTE]:
@@ -232,7 +233,7 @@ class LinuxLrpProcess(LrpProcess):
         # Unable to find this neighbor in any default route. It is not a successor.
         return False
 
-    def get_nexthop(self, destination=None):
+    def get_nexthop(self, destination: Address = None) -> Optional[Address]:
         try:
             with pyroute2.IPRoute() as ipr:
                 if destination is None:
@@ -261,7 +262,7 @@ class LinuxLrpProcess(LrpProcess):
             # No route towards the destination
             return None
 
-    def is_neighbor(self, address) -> bool:
+    def is_neighbor(self, address: Address) -> bool:
         """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`, the neighbor is not added if it
         was not known."""
         try:
@@ -271,7 +272,7 @@ class LinuxLrpProcess(LrpProcess):
             # address is unknown, it is certainly not a neighbor
             return False
 
-    def get_mac_from_ip(self, ip_address):
+    def get_mac_from_ip(self, ip_address: Address):
         try:
             with pyroute2.IPRoute() as ipr:
                 return ipr.neigh("dump", dst=str(ip_address))[0].get_attr('NDA_LLADDR').upper()
@@ -279,7 +280,7 @@ class LinuxLrpProcess(LrpProcess):
             # Unknown IP address
             return None
 
-    def get_ip_from_mac(self, mac_address):
+    def get_ip_from_mac(self, mac_address) -> Optional[Address]:
         try:
             with pyroute2.IPRoute() as ipr:
                 return Address(ipr.neigh("dump", lladdr=mac_address.lower())[0].get_attr('NDA_DST'))
@@ -287,7 +288,7 @@ class LinuxLrpProcess(LrpProcess):
             # Unknown MAC address
             return None
 
-    def add_route(self, destination, next_hop, metric):
+    def add_route(self, destination: Subnet, next_hop: Address, metric: int):
         # Update the routing table
         try:
             self.routes[destination][next_hop] = metric
@@ -302,7 +303,7 @@ class LinuxLrpProcess(LrpProcess):
         if destination != DEFAULT_ROUTE:
             self._netfilter_ensure_is_predecessor(next_hop)
 
-    def del_route(self, destination, next_hop):
+    def del_route(self, destination: Subnet, next_hop: Address):
         # Update the routing table
         try:
             del self.routes[destination][next_hop]
@@ -313,7 +314,7 @@ class LinuxLrpProcess(LrpProcess):
         # Synchronize netlink
         self._netlink_update_route(destination)
 
-    def filter_out(self, destination, max_metric: int = None):
+    def filter_out(self, destination: Subnet, max_metric: int = None):
         route = self.routes[destination]
         changed = False
         for next_hop in list(self.routes[destination].keys()):
@@ -326,7 +327,7 @@ class LinuxLrpProcess(LrpProcess):
             # Synchronize netlink
             self._netlink_update_route(destination)
 
-    def _netfilter_ensure_is_predecessor(self, predecessor_ip):
+    def _netfilter_ensure_is_predecessor(self, predecessor_ip: Address):
         """Ensure this node is known as a predecessor by the firewall."""
         if not self.is_sink:  # All nodes are predecessors for the sink
             self._netfilter_non_routable_table.refresh()
@@ -350,7 +351,7 @@ class LinuxLrpProcess(LrpProcess):
                 self._netfilter_non_routable_table.commit()
                 self.logger.info("%s is now known as predecessor", predecessor_ip)
 
-    def _netfilter_ensure_is_destination(self, destination):
+    def _netfilter_ensure_is_destination(self, destination: Subnet):
         """Ensure this node is known as a host route destination by the firewall."""
         self._netfilter_non_routable_table.refresh()
         for rule in self._netfilter_non_routable_chain.rules:
@@ -366,7 +367,7 @@ class LinuxLrpProcess(LrpProcess):
             self._netfilter_non_routable_table.commit()
             self.logger.info("%s is now known as host route destination", destination)
 
-    def _netlink_update_route(self, destination):
+    def _netlink_update_route(self, destination: Subnet):
         """Must be called whenever self.routes[destination] has changed. Keep netlink
         synchronized with this change."""
 

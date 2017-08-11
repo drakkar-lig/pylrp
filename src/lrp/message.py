@@ -61,7 +61,7 @@ class DIO(Message):
         sink = Address(flow[3:7])
         return cls(metric_value, sink)
 
-    def __init__(self, metric_value, sink):
+    def __init__(self, metric_value: int, sink: Address):
         self.metric_value = metric_value
         self.sink = sink
 
@@ -84,7 +84,7 @@ class RREP(Message):
         hops = int.from_bytes(flow[9:11], lrp.conf['endianess'])
         return cls(source, destination, hops)
 
-    def __init__(self, source, destination, hops):
+    def __init__(self, source: Address, destination: Address, hops: int):
         self.source = source
         self.destination = destination
         self.hops = hops
@@ -108,7 +108,7 @@ class RERR(Message):
         error_destination = Address(flow[5:9])
         return cls(error_source, error_destination)
 
-    def __init__(self, error_source, error_destination):
+    def __init__(self, error_source: Address, error_destination: Address):
         self.error_source = error_source
         self.error_destination = error_destination
 
@@ -131,7 +131,7 @@ class RREQ(Message):
         seqno = int.from_bytes(flow[9:11], lrp.conf['endianess'])
         return cls(searched_node, source, seqno)
 
-    def __init__(self, searched_node, source, seqno):
+    def __init__(self, searched_node: Address, source: Address, seqno):
         self.searched_node = searched_node
         self.source = source
         self.seqno = seqno
