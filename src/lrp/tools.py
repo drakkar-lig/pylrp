@@ -94,7 +94,7 @@ class RoutingTable:
     def del_route(self, destination: Subnet, next_hop: Address):
         """Delete the route to `destination`, through `next_hop`. If a route with the
         same destination but with another next_hop exists, the other one
-        continues to exist. If `destination` is None, it is the default route."""
+        continues to exist."""
         try:
             next_hops = self.routes[destination]
         except KeyError:
@@ -103,9 +103,9 @@ class RoutingTable:
         else:
             del next_hops[next_hop]
 
-    def filter_out_nexthops(self, destination: Subnet, **kwargs) -> List[Tuple[Address, int]]:
+    def filter_out_nexthops(self, destination: Subnet, max_metric: int = None) -> List[Tuple[Address, int]]:
         """Filter out some next hops, according to some constraints. Returns the list
-        of dropped next hops. @see Route.filter_out_nexthops"""
+        of dropped next hops."""
         try:
             next_hops = self.routes[destination]
         except KeyError:
