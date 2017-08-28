@@ -46,9 +46,11 @@ class Subnet(Address):
     def __contains__(self, item):
         if not isinstance(item, Address):
             raise TypeError("A %s cannot be in a %s" % (type(item).__name__, type(self).__name__))
-        if self.as_bytes[0:(self.prefix // 8)] != item.as_bytes[0:(self.prefix // 8)]:
+        if isinstance(item, Subnet) and item.prefix < self.prefix:
             return False
-        return self.as_bytes[self.prefix // 8] >> self.prefix % 8 == item.as_bytes[self.prefix // 8] >> self.prefix % 8
+        mask = ((2 ** self.prefix - 1) << (32 - self.prefix))
+        return int.from_bytes(self.as_bytes, "big") & mask == \
+               int.from_bytes(item.as_bytes, "big") & mask
 
     def __eq__(self, other):
         return isinstance(other, Subnet) and self.as_bytes == other.as_bytes and self.prefix == other.prefix
