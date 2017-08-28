@@ -1,7 +1,7 @@
 import socket
 
 import logging
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Set
 
 import lrp
 
@@ -68,52 +68,12 @@ class Subnet(Address):
 DEFAULT_ROUTE = Subnet(b"\x00\x00\x00\x00", prefix=0)
 
 
-class Route:
-    def __init__(self, destination: Subnet):
-        self.destination = destination
-
-        self.next_hops: Dict[Address, int] = {}
-        self.on_link = False
-
-    def add_nexthop(self, next_hop: Address, metric):
-        """Add a next hop. If it already existed before, it is dropped. The other
-        next hops are kept unchanged."""
-        self.next_hops[next_hop] = metric
-
-    def del_nexthop(self, next_hop: Address):
-        """Delete a next hop. The others are kept unchanged."""
-        del self.next_hops[next_hop]
-
-    def get_a_nexthop(self) -> Optional[Address]:
-        """Return the best next hop, according to the metric. If many are equal,
-        return any of them."""
-        try:
-            return sorted(self.next_hops.items(), key=lambda item: item[1])[0][0]
-        except IndexError:
-            # No nexthop at all
-            return None
-
-    def is_nexthop(self, next_hop: Address) -> bool:
-        """Return true if the provided next_hop is effectively a next_hop."""
-        return next_hop in self.next_hops
-
-    def filter_out_nexthops(self, max_metric: int = None) -> List[Tuple[Address, int]]:
-        """Filter out some next hops, according to some constraints. Returns the list
-        of dropped next hops"""
-        dropped = []
-        for nh in list(self.next_hops):
-            # Filter according to max_metric
-            if self.next_hops[nh] > max_metric:
-                dropped.append((nh, self.next_hops[nh]))
-                del self.next_hops[nh]
-        return dropped
-
-
 class RoutingTable:
     logger = logging.getLogger("RoutingTable")
 
     def __init__(self):
-        self.routes: Dict[Address, Route] = {}
+        self.routes: Dict[Subnet, Dict[Address, int]] = {}
+        self.neighbors: Set[Address] = set()
 
     def add_route(self, destination: Subnet, next_hop: Address, metric: int):
         """Add a route to `destination`, through `next_hop`, with cost `metric`. If a
@@ -122,69 +82,69 @@ class RoutingTable:
         next_hop exists, they coexists, with their own metric. If `destination`
         is None, it is the default route."""
         try:
-            self.routes[destination].add_nexthop(next_hop, metric)
+            next_hops = self.routes[destination]
         except KeyError:
             # Destination was unknown
-            self.routes[destination] = Route(destination)
-            self.routes[destination].add_nexthop(next_hop, metric)
+            next_hops = self.routes[destination] = {next_hop: metric}
+        else:
+            next_hops[next_hop] = metric
+        self.logger.info("Update routing table: next hops for %s are {%s}",
+                         destination, ", ".join(map(str, next_hops)))
 
     def del_route(self, destination: Subnet, next_hop: Address):
         """Delete the route to `destination`, through `next_hop`. If a route with the
         same destination but with another next_hop exists, the other one
         continues to exist. If `destination` is None, it is the default route."""
         try:
-            self.routes[destination].del_nexthop(next_hop)
+            next_hops = self.routes[destination]
         except KeyError:
-            self.logger.warning("When deleting next hop %s of route towards %s: no such next hop",
-                                next_hop, destination)
+            # Unknown destination, no such next_hop, ok.
+            pass
+        else:
+            del next_hops[next_hop]
 
     def filter_out_nexthops(self, destination: Subnet, **kwargs) -> List[Tuple[Address, int]]:
         """Filter out some next hops, according to some constraints. Returns the list
         of dropped next hops. @see Route.filter_out_nexthops"""
         try:
-            route = self.routes[destination]
+            next_hops = self.routes[destination]
         except KeyError:
             # No route, no next hop to filter
             return []
         else:
-            return route.filter_out_nexthops(**kwargs)
+            dropped = []
+            for nh, metric in list(next_hops.items()):
+                # Filter according to max_metric
+                if max_metric is not None and metric > max_metric:
+                    dropped.append((nh, metric))
+                    del next_hops[nh]
+            return dropped
 
     def is_successor(self, nexthop: Address) -> bool:
         """Check if a node is known as a successor."""
         try:
-            default_route = self.routes[DEFAULT_ROUTE]
+            default_next_hops = self.routes[DEFAULT_ROUTE]
         except KeyError:
             # No default route => no successor at all.
             return False
         else:
-            return default_route.is_nexthop(nexthop)
+            return nexthop in default_next_hops
 
     def get_a_nexthop(self, destination: Address) -> Optional[Address]:
         """Return the best next hop for this destination, according to the metric. If
         many are equal, return any of them."""
-        try:
-            route = self.routes[destination]
-        except KeyError:
-            # No route, no next hop
-            return None
+        for route_dest, next_hops in self.routes.items():
+            if destination in route_dest:
+                return sorted(next_hops.items(), key=lambda item: item[1])[0][0]
         else:
-            return route.get_a_nexthop()
+            # No route matches this destination
+            return None
 
     def ensure_is_neighbor(self, neighbor: Address):
         """Check if neighbor is declared. If it is not, add it as neighbor."""
-        for destination, route in self.routes.items():
-            if neighbor in destination and route.on_link:
-                break
-        else:
-            # Not a neighbor. Add it as neighbor
-            destination = Subnet(neighbor)
-            self.routes[destination] = Route(destination)
-            self.routes[destination].on_link = True
+        self.neighbors.add(neighbor)
 
     def is_neighbor(self, neighbor: Address) -> bool:
-        """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`, the neighbor is not added if it
-        was not known."""
-        for destination, route in self.routes.items():
-            if neighbor in destination and route.on_link:
-                return True
-        return False
+        """Check if neighbor is declared. Contrary to `LrpProcess.ensure_is_neighbor`,
+        the neighbor is not added if it was not known."""
+        return neighbor in self.neighbors
