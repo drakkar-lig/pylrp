@@ -217,8 +217,12 @@ class NetlinkRoutingTable(RoutingTable):
 
     def clean(self):
         """Drop all routes inserted by this LRP process"""
-        for destination in self.routes.keys():
-            self.ipr.route("del", dst=str(destination))
+        old_destinations = set(self.routes.keys())
+        old_destinations.update(map(Subnet, self.neighbors))
+        self.routes.clear()
+        self.neighbors.clear()
+        for destination in old_destinations:
+            self._netlink_update_route(destination)
 
 
 @click.command()
