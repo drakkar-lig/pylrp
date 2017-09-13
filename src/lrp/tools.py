@@ -14,6 +14,8 @@ class Address:
             if len(address) != 4:
                 raise Exception("Unsupported address length for %r" % address)
             self.as_bytes = address
+        elif isinstance(address, Address):
+            self.as_bytes = address.as_bytes
         else:
             raise TypeError("Unsupported address type: %s" % type(address))
 

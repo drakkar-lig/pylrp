@@ -5,5 +5,11 @@ conf = {
 
     # Interval in s between DIO emission, when the node is disconnected.
     'dio_reconnect_interval': 10,
-    'dio_delay': 1
+    'dio_delay': 1,
+
+    # netlink-related configuration
+    'netlink': {
+        # RTPROT number for LRP. See `man rtnetlink.7`
+        'proto_number': 43
+    }
 }

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
+import errno
 import logging
 import netfilterqueue
 import select
 import socket
 import struct
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 
 import click
 import pyroute2
-from pyroute2.netlink.rtnl import ifinfmsg
+from pyroute2.netlink.rtnl import ifinfmsg, rt_scope
 
 import lrp
 from lrp.daemon import LrpProcess
@@ -176,32 +177,42 @@ class NetlinkRoutingTable(RoutingTable):
         return return_val
 
     def ensure_is_neighbor(self, neighbor: Address):
-        if neighbor not in self.neighbors:
-            # Add it in netlink structure
-            self.logger.info("Add %s as neighbor in netlink", neighbor)
-            self.ipr.route("add", dst=neighbor.as_subnet(), oif=self.idx,
-                           scope=pyroute2.netlink.rtnl.rtscopes['RT_SCOPE_LINK'],
-                           proto=pyroute2.netlink.rtnl.rtprotos['RTPROT_STATIC'])
-            # import pdb; pdb.set_trace()
+        was_already_neighbor = neighbor in self.neighbors
         super().ensure_is_neighbor(neighbor)
+        if not was_already_neighbor:
+            self._netlink_update_route(Subnet(neighbor))
 
-    def _netlink_update_route(self, destination: Subnet):
-        """Must be called whenever self.routes[destination] has changed. Keep netlink
-        synchronized with this change."""
-        if destination.prefix == 32 and Address(destination.as_bytes) in self.neighbors:
-            # No special need: route is already installed
-            pass
+    def _netlink_update_route(self, destination: Union[Subnet, Address]):
+        """Must be called whenever self.routes[destination] has changed, even
+        if this entry has been dropped. Keep netlink synchronized with this
+        change."""
+
+        if (isinstance(destination, Address) and destination in self.neighbors) or \
+                (destination.prefix == 32 and Address(destination) in self.neighbors):
+            # Recorded as neighbor in local table
+            self.logger.info("Update netlink routing table for neighbor %s", destination)
+            self.ipr.route("replace", dst=str(destination), oif=self.idx,
+                           scope=rt_scope['link'], proto=lrp.conf['netlink']['proto_number'])
         else:
             try:
-                next_hops = self.routes[destination]
-                if destination in next_hops.keys():
-                    raise Exception("Trying to add a neighbor")
+                # Get the route in the routing table structure
+                daemon_next_hops = self.routes[destination]
             except KeyError:
-                # No more next hops
-                pass
+                # Route has been dropped. Just drop it, whatever is its state in netlink
+                try:
+                    self.ipr.route("delete", dst=str(destination), scope=rt_scope['nowhere'])
+                    self.logger.info("Deleted route towards %s", destination)
+                except pyroute2.netlink.exceptions.NetlinkError as e:
+                    if e.code == errno.ESRCH:  # No such process => "no such route" in netlink's logic.
+                        # Route did not exist, ok.
+                        pass
+                    else:
+                        # Unknown exception
+                        raise
             else:
-                multipath = [{'gateway': str(nh), 'hops': metric} for nh, metric in next_hops.items()]
+                # Build the multipath host route
                 self.logger.info("Updating netlink routing table for destination %s", destination)
+                multipath = [{'gateway': str(nh), 'hops': metric} for nh, metric in daemon_next_hops.items()]
                 self.ipr.route("replace", dst=str(destination), multipath=multipath)
 
     def clean(self):
