@@ -95,7 +95,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
             self.logger.debug("Do not use DIO: route is too bad")
             if self.own_metric + 2 < route_cost:
                 self.logger.info("Neighbor may be interested by our DIO")
-                self._schedule_DIO(destination=None) #Mh Ça devrait pas être un unicast là ?
+                self._schedule_DIO(destination=sender)
 
         else:
             self.logger.debug("Neighbor %s is an acceptable successor", sender)
