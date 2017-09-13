@@ -1,7 +1,7 @@
 import abc
 import logging
-import sched
 import random
+import sched
 
 import lrp
 from lrp.message import RREP, DIO, Message, RERR, RREQ
@@ -238,18 +238,14 @@ class LrpProcess(metaclass=abc.ABCMeta):
         assert not self.is_sink, "Sink cannot be disconnected!"
 
         # Check if we already know that we are disconnected
-        for event in self.scheduler.queue:
-            if event.action == self.disconnected:
-                self.logger.debug("Disconnection already handled")
-                break
+        if any(event.action == self.disconnected for event in self.scheduler.queue):
+            self.logger.debug("Disconnection already handled")
         else:
-
             # Check if we are still disconnected
             successor = self.routing_table.get_a_nexthop(DEFAULT_ROUTE)
             if successor is not None:
                 self.logger.info("Node is reconnected to %s", successor)
             else:
-
                 # Handle disconnection
                 self.logger.debug("Trying to connect the DODAG…")
                 self.send_msg(DIO(metric_value=self.own_metric, sink=self.sink), destination=None)
