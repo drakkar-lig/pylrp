@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import errno
 import logging
-import netfilterqueue
 import select
 import socket
 import struct
@@ -230,7 +229,7 @@ class NetlinkRoutingTable(RoutingTable):
               help="The interface LRP should use. Default: auto-detect.")
 @click.option("--metric", default=2 ** 16 - 1, metavar="<metric>",
               help="The initial metric of this node. Should be set for the sink. Default: infinite.")
-@click.option("--sink/--no-sink", default=False, help="Is this node a sink? Default: no.")
+@click.option("--sink/--no-sink", default=False, help="Is this node a sink?", show_default=True)
 def daemon(interface=None, metric=2 ** 16 - 1, sink=False):
     """Launch the LRP daemon."""
     if interface is None:

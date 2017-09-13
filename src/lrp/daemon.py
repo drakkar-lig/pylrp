@@ -56,7 +56,8 @@ class LrpProcess(metaclass=abc.ABCMeta):
         """Send a LRP message to a node.
 
         msg: the Message to be sent
-        destination: The IP address of the destination. If None, broadcast the packet.
+        destination: The IP address of the destination. If None, broadcast the
+          message.
         """
 
     def _new_rreq_seqno(self) -> int:
