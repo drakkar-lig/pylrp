@@ -1,11 +1,11 @@
 import abc
 import logging
-import sched
 import random
+import sched
 
 import lrp
 from lrp.message import RREP, DIO, Message, RERR, RREQ
-from lrp.tools import Address, Subnet, NULL_ADDRESS, DEFAULT_ROUTE
+from lrp.tools import Address, Subnet, NULL_ADDRESS, DEFAULT_ROUTE, RoutingTable
 
 
 class LrpProcess(metaclass=abc.ABCMeta):
@@ -29,6 +29,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         self._tracked_rreq = {}
         self._own_current_seqno = 0
         self.scheduler = sched.scheduler()
+        self.routing_table = RoutingTable()
 
     def __enter__(self):
         self.logger.debug("LRP process started")
@@ -55,21 +56,9 @@ class LrpProcess(metaclass=abc.ABCMeta):
         """Send a LRP message to a node.
 
         msg: the Message to be sent
-        destination: The IP address of the destination. If None, broadcast the packet.
+        destination: The IP address of the destination. If None, broadcast the
+          message.
         """
-
-    @abc.abstractmethod
-    def ensure_is_neighbor(self, address: Address):
-        """Check if neighbor is declared. If it is not, add it as neighbor."""
-
-    @abc.abstractmethod
-    def is_successor(self, address: Address) -> bool:
-        """Check if a node is known as a successor."""
-
-    @abc.abstractmethod
-    def get_nexthop(self, destination: Address = None) -> Address:
-        """Get a next_hop towards a `destination`. If `destination` is None, get a
-        successor. If there is no such next hop, return None"""
 
     def _new_rreq_seqno(self) -> int:
         self._own_current_seqno += 1
@@ -92,7 +81,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         else:
             self.logger.info("Received message %s from %s to %s",
                              msg, sender, "broadcast" if is_broadcast else "myself")
-            self.ensure_is_neighbor(sender)
+            self.routing_table.ensure_is_neighbor(sender)
             handler(msg, sender, is_broadcast)
 
     def _handle_DIO(self, dio: DIO, sender: Address, is_broadcast: bool):
@@ -107,14 +96,14 @@ class LrpProcess(metaclass=abc.ABCMeta):
             self.logger.debug("Do not use DIO: route is too bad")
             if self.own_metric + 2 < route_cost:
                 self.logger.info("Neighbor may be interested by our DIO")
-                self._schedule_DIO(dest_for_DIO=None) #Mh Ça devrait pas être un unicast là ?
+                self._schedule_DIO(destination=sender)
 
         else:
             self.logger.debug("Neighbor %s is an acceptable successor", sender)
-            was_already_successor = self.is_successor(sender)
+            was_already_successor = self.routing_table.is_successor(sender)
 
             # Add route
-            self.add_route(DEFAULT_ROUTE, sender, route_cost)
+            self.routing_table.add_route(DEFAULT_ROUTE, sender, route_cost)
 
             # Update position in the DODAG
             if self.own_metric > route_cost:
@@ -128,34 +117,45 @@ class LrpProcess(metaclass=abc.ABCMeta):
                     self.sink = dio.sink
 
                 self.logger.debug("Check if old successors are still usable")
-                self.filter_out(DEFAULT_ROUTE, max_metric=self.own_metric + 1)
+                self.routing_table.filter_out_nexthops(DEFAULT_ROUTE, max_metric=self.own_metric + 1)
 
                 self.logger.debug("Inform neighbors that we have changed our metric")
-                self._schedule_DIO(dest_for_DIO=None)
+                self._schedule_DIO(destination=None)
 
             if not was_already_successor:
                 # This neighbor does not know us as predecessor. Send RREP
                 self.logger.info("Create host route through %s" % sender)
                 self.send_msg(RREP(self.own_ip, self.sink, 0), destination=sender)
 
-    def _schedule_DIO(self,dest_for_DIO):
-        # If a DIO is scheduled and it is unicast, switch to bcast
-        if self.dest_next_DIO != None and self.dest_next_DIO != dest_for_DIO:
-            self.dest_next_DIO = None
-        self.dest_next_DIO = dest_for_DIO
-        for event in self.scheduler.queue:
-            if event.action == self._schedule_DIO:
-                self.logger.debug("DIO already programmed")
-                break
-        else:
-            random_delay=random.random()*lrp.conf['dio_delay']
-            self.logger.debug("Programming DIO in %s s",random_delay)
-            self.scheduler.enter(random_delay, 0, action=self._send_DIO)
+    def _schedule_DIO(self, destination):
+        """Schedule the sending of a DIO towards this destination.
 
-    def _send_DIO(self):
-        self.send_msg(DIO(metric_value=self.own_metric, sink=self.sink), destination=self.dest_next_DIO)
-        # Revert to default sending bcast
-        dest_next_DIO = None
+        If a DIO is already programmed, only one broadcast DIO will be
+        scheduled.
+
+        destination: the IP address of the destination. If None, broadcast the
+          message."""
+
+        try:
+            # Get the scheduled DIO
+            scheduled_action = [event for event in self.scheduler.queue if event.action == self._send_DIO][0]
+            if scheduled_action.kwargs['destination'] is None:
+                self.logger.debug("Broadcast DIO already programmed")
+            else:
+                self.logger.debug("Unicast DIO already programmed. Convert it to a broadcast DIO")
+                scheduled_action.kwargs['destination'] = None
+        except IndexError:
+            # No DIO scheduled. Just have to schedule this one.
+            random_delay = random.random() * lrp.conf['dio_delay']
+            self.logger.debug("Program DIO in %.3fs", random_delay)
+            self.scheduler.enter(random_delay, 0, action=self._send_DIO, kwargs={'destination': destination})
+
+    def _send_DIO(self, destination=None):
+        """Send a DIO to a node.
+
+        destination: the IP address of the destination. If None, broadcast the
+          message."""
+        self.send_msg(DIO(metric_value=self.own_metric, sink=self.sink), destination=destination)
 
     def _handle_RREP(self, rrep: RREP, sender: Address, is_broadcast: bool):
         assert not is_broadcast, "Broadcast RREP are unacceptable"
@@ -164,7 +164,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
         # between here and the sender
         route_cost = rrep.hops + 1
 
-        self.add_route(Subnet(rrep.source), sender, route_cost)
+        self.routing_table.add_route(Subnet(rrep.source), sender, route_cost)
 
         # Update and forward RREP
         rrep.hops = route_cost
@@ -173,9 +173,9 @@ class LrpProcess(metaclass=abc.ABCMeta):
         elif self.is_sink:
             self.logger.warning("Do not forward a RREP through the sink")
         else:
-            nexthop = self.get_nexthop(rrep.destination)
+            nexthop = self.routing_table.get_a_nexthop(rrep.destination)
             if nexthop is not None:
-                assert self.is_successor(nexthop), \
+                assert self.routing_table.is_successor(nexthop), \
                     "Trying to send a RREP through %s, which is not a successor (forbidden!)" % nexthop
                 self.logger.info("Forward RREP to %s", nexthop)
                 self.send_msg(rrep, destination=nexthop)
@@ -183,18 +183,18 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 self.logger.error("Unable to forward %s: no route towards %s", rrep.message_type, rrep.destination)
 
     def _handle_RERR(self, rerr: RERR, sender: Address, is_broadcast: bool):
-        if self.is_successor(sender):
+        if self.routing_table.is_successor(sender):
             self.logger.info("Inform %s that we are its predecessor", sender)
             self.send_msg(RREP(source=self.own_ip, destination=self.sink, hops=0), destination=sender)
         else:
             # Remove host route towards the unreachable destination
-            self.del_route(Subnet(rerr.error_destination), sender)
+            self.routing_table.del_route(Subnet(rerr.error_destination), sender)
 
-            if self.get_nexthop(rerr.error_destination) is not None:
+            if self.routing_table.get_a_nexthop(rerr.error_destination) is not None:
                 self.logger.info("Drop RERR: we still have a route towards %s", rerr.error_destination)
             else:
                 # No more next hop towards rerr.error_destination. Forward RERR.
-                next_hop = self.get_nexthop(rerr.error_source)
+                next_hop = self.routing_table.get_a_nexthop(rerr.error_source)
                 if next_hop is None:
                     self.logger.warning("Unable to forward RERR: no route towards %s", rerr.error_source)
                 else:
@@ -220,7 +220,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
                 # Handle the message
                 if rreq.searched_node == self.own_ip:
                     self.logger.info("We are the searched node. Answer with a RREP")
-                    successor = self.get_nexthop(None)
+                    successor = self.routing_table.get_a_nexthop(DEFAULT_ROUTE)
                     if successor is None:
                         self.logger.error("Cannot send RREP: no more successor")
                     else:
@@ -244,42 +244,20 @@ class LrpProcess(metaclass=abc.ABCMeta):
         self.send_msg(RREQ(searched_node=destination, source=self.own_ip, seqno=self._new_rreq_seqno()),
                       destination=None)
 
-    @abc.abstractmethod
-    def add_route(self, destination: Subnet, next_hop: Address, metric: int):
-        """Add a route to `destination`, through `next_hop`, with cost `metric`. If a
-        route with the same destination/next_hop already exists, it is erased
-        by the new one. If a route with the same destination but with another
-        next_hop exists, they coexists, with their own metric. If `destination`
-        is None, it is the default route."""
-
-    @abc.abstractmethod
-    def del_route(self, destination: Subnet, next_hop: Address):
-        """Delete the route to `destination`, through `next_hop`. If a route with the
-        same destination but with another next_hop exists, the other one
-        continues to exist. If `destination` is None, it is the default route."""
-
-    @abc.abstractmethod
-    def filter_out(self, destination: Subnet, max_metric: int = None):
-        """Filter out some routes, according to some constraints."""
-
     def disconnected(self):
         """Should be called whenever the node is detected as disconnected. Handle disconnection by sending regularly
         DIOs."""
         assert not self.is_sink, "Sink cannot be disconnected!"
 
         # Check if we already know that we are disconnected
-        for event in self.scheduler.queue:
-            if event.action == self.disconnected:
-                self.logger.debug("Disconnection already handled")
-                break
+        if any(event.action == self.disconnected for event in self.scheduler.queue):
+            self.logger.debug("Disconnection already handled")
         else:
-
             # Check if we are still disconnected
-            successor = self.get_nexthop(None)
+            successor = self.routing_table.get_a_nexthop(DEFAULT_ROUTE)
             if successor is not None:
                 self.logger.info("Node is reconnected to %s", successor)
             else:
-
                 # Handle disconnection
                 self.logger.debug("Trying to connect the DODAG…")
                 self.send_msg(DIO(metric_value=self.own_metric, sink=self.sink), destination=None)
