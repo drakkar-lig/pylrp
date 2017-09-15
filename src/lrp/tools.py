@@ -42,10 +42,24 @@ MULTICAST_ADDRESS = Address(lrp.conf['service_multicast_address'])
 
 class Subnet(Address):
     def __init__(self, address, prefix: int = 32):
-        if isinstance(address, Address):
-            super().__init__(address.as_bytes)
-        else:
+        if isinstance(address, Address) or isinstance(address, bytes):
             super().__init__(address)
+        elif isinstance(address, str):
+            parts = address.split("/", 1)
+            super().__init__(parts[0])
+            if len(parts) > 1:
+                # prefix is given in `address`
+                mask = parts[1].split(".")
+                if len(mask) == 1:
+                    # Parse .../32 format
+                    self.prefix = int(mask[0])
+                else:
+                    # Parse .../255.255.255.255 format
+                    prefix = format(int.from_bytes(bytes(int(a) for a in mask), 'big'), 'b').find("0")
+                    if prefix == -1:
+                        prefix = 32
+        else:
+            raise TypeError("Unexpected type %s" % type(address))
         self.prefix = prefix
 
     def __contains__(self, item):
