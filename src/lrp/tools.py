@@ -155,7 +155,7 @@ class RoutingTable:
                 del self.routes[destination]
             return dropped
 
-    def is_successor(self, nexthop: Address) -> bool:
+    def is_successor(self, neighbor: Address) -> bool:
         """Check if a node is known as a successor."""
         try:
             default_next_hops = self.routes[DEFAULT_ROUTE]
@@ -163,7 +163,11 @@ class RoutingTable:
             # No default route => no successor at all.
             return False
         else:
-            return nexthop in default_next_hops
+            return neighbor in default_next_hops
+
+    def is_predecessor(self, neighbor: Address) -> bool:
+        """Check if a node is known as predecessor, i.e. as next-hop for any route"""
+        return any(neighbor in next_hops.keys() for next_hops in self.routes.values())
 
     def get_a_nexthop(self, destination: Address) -> Optional[Address]:
         """Return the best next hop for this destination, according to the metric. If
