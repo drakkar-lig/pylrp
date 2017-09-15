@@ -117,7 +117,7 @@ class LrpProcess(metaclass=abc.ABCMeta):
                     self.sink = dio.sink
 
                 self.logger.debug("Check if old successors are still usable")
-                self.routing_table.filter_out_nexthops(DEFAULT_ROUTE, max_metric=self.own_metric + 1)
+                self.routing_table.filter_out_nexthops(DEFAULT_ROUTE, max_metric=self.own_metric)
 
                 self.logger.debug("Inform neighbors that we have changed our metric")
                 self._schedule_DIO(destination=None)
