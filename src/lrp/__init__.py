@@ -10,6 +10,8 @@ conf = {
     # netlink-related configuration
     'netlink': {
         # RTPROT number for LRP. See `man rtnetlink.7`
-        'proto_number': 43
+        'proto_number': 43,
+        # Number of the netfilter queue where non-routables are sent
+        'netfilter_queue_nb': 43,
     }
 }

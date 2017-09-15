@@ -19,7 +19,11 @@ class Address:
             raise TypeError("Unsupported address type: %s" % type(address))
 
     def __eq__(self, other):
-        return isinstance(other, Address) and self.as_bytes == other.as_bytes
+        if isinstance(other, Address):
+            return self.as_bytes == other.as_bytes
+        if isinstance(other, str):
+            return self.__eq__(Address(other))
+        return NotImplemented
 
     def __hash__(self):
         return self.as_bytes.__hash__()
@@ -38,10 +42,24 @@ MULTICAST_ADDRESS = Address(lrp.conf['service_multicast_address'])
 
 class Subnet(Address):
     def __init__(self, address, prefix: int = 32):
-        if isinstance(address, Address):
-            super().__init__(address.as_bytes)
-        else:
+        if isinstance(address, Address) or isinstance(address, bytes):
             super().__init__(address)
+        elif isinstance(address, str):
+            parts = address.split("/", 1)
+            super().__init__(parts[0])
+            if len(parts) > 1:
+                # prefix is given in `address`
+                mask = parts[1].split(".")
+                if len(mask) == 1:
+                    # Parse .../32 format
+                    self.prefix = int(mask[0])
+                else:
+                    # Parse .../255.255.255.255 format
+                    prefix = format(int.from_bytes(bytes(int(a) for a in mask), 'big'), 'b').find("0")
+                    if prefix == -1:
+                        prefix = 32
+        else:
+            raise TypeError("Unexpected type %s" % type(address))
         self.prefix = prefix
 
     def __contains__(self, item):
@@ -54,10 +72,18 @@ class Subnet(Address):
                int.from_bytes(item.as_bytes, "big") & mask
 
     def __eq__(self, other):
-        return isinstance(other, Subnet) and self.as_bytes == other.as_bytes and self.prefix == other.prefix
+        if isinstance(other, Subnet):
+            return self.as_bytes == other.as_bytes and self.prefix == other.prefix
+        if isinstance(other, str):
+            return self.__eq__(Subnet(other))
+        return NotImplemented
 
     def __hash__(self):
-        return (self.as_bytes + bytes(self.prefix)).__hash__()
+        if self.prefix == 32:
+            # Compatibility with Address
+            return super().__hash__()
+        else:
+            return (self.as_bytes + bytes(self.prefix)).__hash__()
 
     def __str__(self):
         if self is DEFAULT_ROUTE:
@@ -103,6 +129,9 @@ class RoutingTable:
             pass
         else:
             del next_hops[next_hop]
+            if len(next_hops) == 0:
+                # No more next hops for this route
+                del self.routes[destination]
 
     def filter_out_nexthops(self, destination: Subnet, max_metric: int = None) -> List[Tuple[Address, int]]:
         """Filter out some next hops, according to some constraints. Returns the list
@@ -117,11 +146,16 @@ class RoutingTable:
             for nh, metric in list(next_hops.items()):
                 # Filter according to max_metric
                 if max_metric is not None and metric > max_metric:
+                    self.logger.debug("Filter next hop %s out of host route towards %s: too big metric (%d)",
+                                      nh, destination, max_metric)
                     dropped.append((nh, metric))
                     del next_hops[nh]
+            if len(next_hops) == 0:
+                # No more next hops for this route
+                del self.routes[destination]
             return dropped
 
-    def is_successor(self, nexthop: Address) -> bool:
+    def is_successor(self, neighbor: Address) -> bool:
         """Check if a node is known as a successor."""
         try:
             default_next_hops = self.routes[DEFAULT_ROUTE]
@@ -129,14 +163,19 @@ class RoutingTable:
             # No default route => no successor at all.
             return False
         else:
-            return nexthop in default_next_hops
+            return neighbor in default_next_hops
+
+    def is_predecessor(self, neighbor: Address) -> bool:
+        """Check if a node is known as predecessor, i.e. as next-hop for any route"""
+        return any(neighbor in next_hops.keys() for next_hops in self.routes.values())
 
     def get_a_nexthop(self, destination: Address) -> Optional[Address]:
         """Return the best next hop for this destination, according to the metric. If
         many are equal, return any of them."""
-        for route_dest, next_hops in self.routes.items():
+        for route_dest, next_hops in sorted(self.routes.items(), key=lambda tple: tple[0].prefix, reverse=True):
             if destination in route_dest:
-                return sorted(next_hops.items(), key=lambda item: item[1])[0][0]
+                best_nh, metric = max(next_hops.items(), key=lambda tple: tple[1])
+                return best_nh
         else:
             # No route matches this destination
             return None
@@ -151,7 +190,7 @@ class RoutingTable:
         return neighbor in self.neighbors
 
     def __str__(self):
-        return "[%s && %s]" % (
+        return "[%s ; %s]" % (
             ", ".join(map(str, self.neighbors)),
             ", ".join("%s: {%s}" % (dest, ", ".join("%s: %d" % (nh, hops) for nh, hops in next_hops.items()))
-                      for dest, next_hops in self.routes.items() if Address(dest) not in self.neighbors))
+                      for dest, next_hops in self.routes.items()))
