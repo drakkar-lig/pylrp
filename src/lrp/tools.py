@@ -19,7 +19,11 @@ class Address:
             raise TypeError("Unsupported address type: %s" % type(address))
 
     def __eq__(self, other):
-        return isinstance(other, Address) and self.as_bytes == other.as_bytes
+        if isinstance(other, Address):
+            return self.as_bytes == other.as_bytes
+        if isinstance(other, str):
+            return self.__eq__(Address(other))
+        return NotImplemented
 
     def __hash__(self):
         return self.as_bytes.__hash__()
@@ -54,10 +58,18 @@ class Subnet(Address):
                int.from_bytes(item.as_bytes, "big") & mask
 
     def __eq__(self, other):
-        return isinstance(other, Subnet) and self.as_bytes == other.as_bytes and self.prefix == other.prefix
+        if isinstance(other, Subnet):
+            return self.as_bytes == other.as_bytes and self.prefix == other.prefix
+        if isinstance(other, str):
+            return self.__eq__(Subnet(other))
+        return NotImplemented
 
     def __hash__(self):
-        return (self.as_bytes + bytes(self.prefix)).__hash__()
+        if self.prefix == 32:
+            # Compatibility with Address
+            return super().__hash__()
+        else:
+            return (self.as_bytes + bytes(self.prefix)).__hash__()
 
     def __str__(self):
         if self is DEFAULT_ROUTE:
