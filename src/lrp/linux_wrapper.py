@@ -23,7 +23,15 @@ class LinuxLrpProcess(LrpProcess):
     netlink and netfilter are available on the system."""
 
     def __init__(self, interface, **remaining_kwargs):
+        self._own_ip = None
         self.interface = interface
+        # Compute the interface id, based on its name
+        with pyroute2.IPRoute() as ipr:
+            try:
+                self.interface_idx = ipr.link_lookup(ifname=self.interface)[0]
+            except IndexError:
+                raise Exception("%s: unknown interface" % self.interface)
+
         super().__init__(**remaining_kwargs)
         self.routing_table = NetlinkRoutingTable(self)
         self.non_routables_queue = netfilterqueue.NetfilterQueue()
@@ -93,16 +101,13 @@ class LinuxLrpProcess(LrpProcess):
 
     @property
     def own_ip(self) -> Address:
-        try:
-            return self._own_ip
-        except AttributeError:
-            # _own_ip was never computed
+        if self._own_ip is None:
             with pyroute2.IPRoute() as ip:
                 try:
                     self._own_ip = Address(ip.get_addr(index=self.interface_idx)[0].get_attr('IFA_ADDRESS'))
                 except IndexError:
                     raise Exception("%s: interface has no IP address" % self.interface)
-            return self._own_ip
+        return self._own_ip
 
     @property
     def network_prefix(self) -> Subnet:
@@ -111,19 +116,6 @@ class LinuxLrpProcess(LrpProcess):
         # portable. Should be improved.
         prefix = Subnet(self.own_ip.as_bytes[0:2] + b"\x00\x00", prefix=16)
         return prefix
-
-    @property
-    def interface_idx(self) -> int:
-        try:
-            return self._idx
-        except AttributeError:
-            # _idx was never computed
-            with pyroute2.IPRoute() as ip:
-                try:
-                    self._idx = ip.link_lookup(ifname=self.interface)[0]
-                except IndexError:
-                    raise Exception("%s: unknown interface" % self.interface)
-            return self._idx
 
     def wait_event(self):
         queue_fd = self.non_routables_queue.get_fd()
