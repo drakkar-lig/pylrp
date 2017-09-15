@@ -168,9 +168,10 @@ class RoutingTable:
     def get_a_nexthop(self, destination: Address) -> Optional[Address]:
         """Return the best next hop for this destination, according to the metric. If
         many are equal, return any of them."""
-        for route_dest, next_hops in self.routes.items():
+        for route_dest, next_hops in sorted(self.routes.items(), key=lambda tple: tple[0].prefix, reverse=True):
             if destination in route_dest:
-                return sorted(next_hops.items(), key=lambda item: item[1])[0][0]
+                best_nh, metric = max(next_hops.items(), key=lambda tple: tple[1])
+                return best_nh
         else:
             # No route matches this destination
             return None
