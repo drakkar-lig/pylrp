@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import errno
 import logging
+import netfilterqueue
 import select
 import socket
 import struct
@@ -20,12 +21,11 @@ class LinuxLrpProcess(LrpProcess):
     """Linux toolbox to make LrpProcess works on native linux. It supposes that
     netlink and netfilter are available on the system."""
 
-    non_routable_queue_nb = 7
-
     def __init__(self, interface, **remaining_kwargs):
         self.interface = interface
         super().__init__(**remaining_kwargs)
         self.routing_table = NetlinkRoutingTable(interface_idx=self.interface_idx)
+        self.non_routables_queue = netfilterqueue.NetfilterQueue()
 
     def __enter__(self):
         # Initialize sockets
@@ -52,6 +52,22 @@ class LinuxLrpProcess(LrpProcess):
         self.unicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.unicast_socket.bind((str(self.own_ip), lrp.conf['service_port']))
 
+        # Initialize netfilter queue
+        def queue_packet_handler(packet):
+            """Handle a non-routable and activate corresponding LRP mechanisms"""
+            payload = packet.get_payload()
+            destination = socket.inet_ntoa(payload[16:20])
+            if self.is_sink:
+                self.handle_unknown_host(destination)
+            else:
+                source = socket.inet_ntoa(payload[12:16])
+                sender = ":".join(["%02x" % b for b in packet.get_hw()[0:6]])
+                self.handle_non_routable_packet(source, destination, self.routing_table.get_ip_from_mac(sender))
+            packet.drop()
+
+        self.non_routables_queue.bind(lrp.conf['netlink']['netfilter_queue_nb'], queue_packet_handler)
+        # self.non_routables_queue.fileno = lambda: self.non_routables_queue.get_fd()
+
         # Initialize LRP itself
         return super().__enter__()
 
@@ -67,6 +83,8 @@ class LinuxLrpProcess(LrpProcess):
 
         # Clean the routing table
         self.routing_table.clean()
+        # Close netfilter-queue
+        self.non_routables_queue.unbind()
 
     @property
     def own_ip(self) -> Address:
@@ -103,22 +121,26 @@ class LinuxLrpProcess(LrpProcess):
             return self._idx
 
     def wait_event(self):
+        queue_fd = self.non_routables_queue.get_fd()
         while True:
             # Handle timers
             next_time_event = self.scheduler.run(blocking=False)
             # Handle socket input, but stop when next time event occurs
-            rr, _, _ = select.select([self.input_multicast_socket, self.unicast_socket],
+            rr, _, _ = select.select([self.input_multicast_socket, self.unicast_socket, queue_fd],
                                      [], [], next_time_event)
             try:
-                # Handle packet from socket
-                readable_socket = rr[0]
-                data, (sender, _) = readable_socket.recvfrom(16)
-                sender = Address(sender)
-                if sender == self.own_ip:
-                    self.logger.debug("Skip a message from ourselves")  # Happen on broadcast messages
+                # Handle packet from socket or queue
+                readable = rr[0]
+                if readable == queue_fd:
+                    self.non_routables_queue.run(block=False)
                 else:
-                    msg = Message.parse(data)
-                    self.handle_msg(msg, sender, is_broadcast=(readable_socket is self.input_multicast_socket))
+                    data, (sender, _) = readable.recvfrom(16)
+                    sender = Address(sender)
+                    if sender == self.own_ip:
+                        self.logger.debug("Skip a message from ourselves")  # Happen on broadcast messages
+                    else:
+                        msg = Message.parse(data)
+                        self.handle_msg(msg, sender, is_broadcast=(readable is self.input_multicast_socket))
             except IndexError:
                 # No available readable socket. Select timed out. We have no new packet, but a timed event needs to
                 # be activated. Loop.
