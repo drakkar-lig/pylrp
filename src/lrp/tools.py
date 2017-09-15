@@ -185,7 +185,7 @@ class RoutingTable:
         return neighbor in self.neighbors
 
     def __str__(self):
-        return "[%s && %s]" % (
+        return "[%s ; %s]" % (
             ", ".join(map(str, self.neighbors)),
             ", ".join("%s: {%s}" % (dest, ", ".join("%s: %d" % (nh, hops) for nh, hops in next_hops.items()))
-                      for dest, next_hops in self.routes.items() if Address(dest) not in self.neighbors))
+                      for dest, next_hops in self.routes.items()))
