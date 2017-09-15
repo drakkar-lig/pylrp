@@ -129,6 +129,9 @@ class RoutingTable:
             pass
         else:
             del next_hops[next_hop]
+            if len(next_hops) == 0:
+                # No more next hops for this route
+                del self.routes[destination]
 
     def filter_out_nexthops(self, destination: Subnet, max_metric: int = None) -> List[Tuple[Address, int]]:
         """Filter out some next hops, according to some constraints. Returns the list
@@ -143,8 +146,13 @@ class RoutingTable:
             for nh, metric in list(next_hops.items()):
                 # Filter according to max_metric
                 if max_metric is not None and metric > max_metric:
+                    self.logger.debug("Filter next hop %s out of host route towards %s: too big metric (%d)",
+                                      nh, destination, max_metric)
                     dropped.append((nh, metric))
                     del next_hops[nh]
+            if len(next_hops) == 0:
+                # No more next hops for this route
+                del self.routes[destination]
             return dropped
 
     def is_successor(self, nexthop: Address) -> bool:
