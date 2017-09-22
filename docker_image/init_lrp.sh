@@ -35,8 +35,18 @@ NEW_IP="$(sed 'sW\(.*\)/.*W\1/32W' <<< "${OLD_IP}")"
 ip address add "${NEW_IP}" dev "${NETWORK_INTERFACE}"
 log "${NEW_IP} set"
 
-# Wait for container be ready to start
-read -p "System initialized. Press enter to continue" foo
+# Use `--wait` to make init script waiting before chaining with the next
+# command. To unlock it, just touch the file `/init_ready`. Useful if external
+# configuration is needed before the machine starts.
+if [ "$1" = "--wait" ]; then
+    shift  # Eat '--wait'
+    log "Wait for \`/init_ready\`"
+    while [ ! -e /init_ready ]; do
+        sleep 1
+    done
+    rm /init_ready
+fi
 
 # Chain the next command
+log "Launch $1"
 exec "$@"
