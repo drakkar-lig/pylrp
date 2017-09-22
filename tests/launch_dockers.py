@@ -7,6 +7,7 @@ import sys
 
 import click
 import docker
+import time
 from docker.models.containers import Container
 
 DEFAULT_NETWORK_NAME = "lrp_net_channel"
@@ -133,6 +134,25 @@ def cli():
     pass
 
 
+def exec_with_rc(container: Container, cmd):
+    """Execute command on a container and get its return code.
+
+    The command is executed in the same way `container.exec_run` would do,
+    but stdout and stderr are discarded and the function return its exit code."""
+    client = docker.from_env()
+    exec_id = client.api.exec_create(container.id, cmd, stdout=False, stderr=False)['Id']
+    client.api.exec_start(exec_id, detach=False)
+
+    response = client.api.exec_inspect(exec_id)
+
+    # Fix: wait for the command to finish. With detach=False, docker-py should wait for it to finish, but it does not…
+    while response['Running']:
+        time.sleep(0.5)
+        response = client.api.exec_inspect(exec_id)
+
+    return response['ExitCode']
+
+
 @cli.command()
 @click.option("--project-root",
               default=os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[0]))), show_default=True,
@@ -142,15 +162,24 @@ def cli():
 @click.option("--ebtables-chain-name", default=DEFAULT_EBTABLES_CHAIN_NAME, show_default=True,
               help="Name of the ebtable chain to use")
 def start(project_root, network_name, ebtables_chain_name):
+    test_succeed = True
+
     with DockerAirNetwork(network_name) as net:
         with LrpContainer("lrp_77", project_root, net) as container:
             with LrpContainer("lrp_00", project_root, net, is_sink=True) as sink:
                 net.allow_comunication(sink, container, two_sides=True)
 
-                # Stop, wait, and get CLI instructions
-                import code
-                code.interact(local=locals())
-                pass
+                # Wait for daemon to be initialized
+                logger.info("Wait after the routing protocol…")
+                time.sleep(5)
+
+                # Test for connectivity
+                rc = exec_with_rc(sink.container, "ping -c2 lrp_77")
+                if rc != 0:
+                    test_succeed = False
+                    logger.error("Unable to ping lrp_77 from %r (rc=%d)", sink.container.name, rc)
+
+    return test_succeed
 
 
 if __name__ == '__main__':
