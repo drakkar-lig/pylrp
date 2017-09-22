@@ -159,9 +159,7 @@ def exec_with_rc(container: Container, cmd):
               help="Path to the project root.")
 @click.option("--network-name", default=DEFAULT_NETWORK_NAME, show_default=True,
               help="Name of the docker network.")
-@click.option("--ebtables-chain-name", default=DEFAULT_EBTABLES_CHAIN_NAME, show_default=True,
-              help="Name of the ebtable chain to use")
-def start(project_root, network_name, ebtables_chain_name):
+def start(project_root, network_name):
     test_succeed = True
 
     with DockerAirNetwork(network_name) as net:
