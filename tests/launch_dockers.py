@@ -15,6 +15,37 @@ DEFAULT_IMAGE = "audeoudh/lrp:latest"
 DEFAULT_EBTABLES_CHAIN_NAME = "lrp_net_channel"
 
 
+class NetworkTopology:
+    def __init__(self, container_names, network_name, project_root):
+        self.container_names = container_names
+        self.network_name = network_name
+        self.project_root = project_root
+        self.started_containers = list()
+        self.started_network = None
+
+    def __enter__(self):
+        # Start network
+        self.started_network = DockerAirNetwork(self.network_name).__enter__()
+
+        # Start all containers
+        try:
+            for container_name in self.container_names:
+                container = LrpContainer(container_name, self.project_root, self.started_network).__enter__()
+                self.started_containers.append(container)
+        except Exception as e:
+            # Stop all what we have started until now
+            self.__exit__(type(e), e, e.__traceback__)
+            raise
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for container in self.started_containers:
+            container.__exit__(exc_type, exc_val, exc_tb)
+        if self.started_network is not None:
+            self.started_network.__exit__(exc_type, exc_val, exc_tb)
+
+
 class LrpContainer:
     def __init__(self, container_name, project_root, network, image=DEFAULT_IMAGE, is_sink=False):
         self.container_name = container_name
@@ -153,6 +184,13 @@ def exec_with_rc(container: Container, cmd):
     return response['ExitCode']
 
 
+def test_connectivity(from_, to, count=2):
+    rc = exec_with_rc(from_, ["ping", "-c", str(count), to.name])
+    if rc != 0:
+        logger.error("Unable to ping %r from %r (rc=%d)", to.name, from_.name, rc)
+        return False
+
+
 @cli.command()
 @click.option("--project-root",
               default=os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[0]))), show_default=True,
@@ -160,24 +198,12 @@ def exec_with_rc(container: Container, cmd):
 @click.option("--network-name", default=DEFAULT_NETWORK_NAME, show_default=True,
               help="Name of the docker network.")
 def start(project_root, network_name):
-    test_succeed = True
+    with NetworkTopology(("lrp_77", "lrp_00"), network_name, project_root) as net:
 
-    with DockerAirNetwork(network_name) as net:
-        with LrpContainer("lrp_77", project_root, net) as container:
-            with LrpContainer("lrp_00", project_root, net, is_sink=True) as sink:
-                net.allow_comunication(sink, container, two_sides=True)
+        logger.info("Wait for the routing protocol's initialization…")
+        time.sleep(5)
 
-                # Wait for daemon to be initialized
-                logger.info("Wait after the routing protocol…")
-                time.sleep(5)
-
-                # Test for connectivity
-                rc = exec_with_rc(sink.container, "ping -c2 lrp_77")
-                if rc != 0:
-                    test_succeed = False
-                    logger.error("Unable to ping lrp_77 from %r (rc=%d)", sink.container.name, rc)
-
-    return test_succeed
+        return test_connectivity(from_=net.started_containers[0].container, to=net.started_containers[1].container)
 
 
 if __name__ == '__main__':
