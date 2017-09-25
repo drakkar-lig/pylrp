@@ -9,4 +9,5 @@ setup(name='pylrp',
       author_email="henry-joseph.audeoud@univ-grenoble-alpes.fr",
       url="https://gitlab.imag.fr/audeoudh/pylrp",
       packages=['lrp'], package_dir={'': 'src'},
-      install_requires=['click', 'pyroute2', 'python-iptables', 'NetfilterQueue', 'scapy-python3', 'docker'])
+      install_requires=['click', 'pyroute2', 'python-iptables', 'NetfilterQueue', 'scapy-python3', 'docker',
+                        'networkx'])
