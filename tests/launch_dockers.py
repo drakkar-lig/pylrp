@@ -115,7 +115,7 @@ class DockerBasedWSN:
         # Prepend the init script
         command = "/root/pylrp/docker_image/init_lrp.sh -v --wait " + command
 
-        logger.info("Start container %r", container_name)
+        logger.info("Start container %r%s", container_name, " as a sink" if is_sink else "")
         container = self._docker_client.containers.run(
             image=image, volumes=["%s:%s:ro" % (self.project_root, '/root/pylrp')],
             working_dir="/root/pylrp/src", command=command, entrypoint="/root/pylrp/docker_image/init_lrp.sh",
@@ -187,6 +187,7 @@ def start(project_root=DEFAULT_PROJECT_ROOT, network_name=DEFAULT_NETWORK_NAME):
                              ("lrp_2", "lrp_3"), ("lrp_2", "lrp_4"),
                              ("lrp_3", "lrp_5"), ("lrp_3", "lrp_6"),
                              ("lrp_4", "lrp_6")))
+    topology.add_node("lrp_1", is_sink=True)
 
     # Start dockers & LRP daemons
     with DockerBasedWSN(topology.to_directed(), docker_network_name=network_name, project_root=project_root) as net:
