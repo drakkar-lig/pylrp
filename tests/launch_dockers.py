@@ -173,6 +173,7 @@ def test_connectivity(from_, to, count=2):
     if rc != 0:
         logger.error("Unable to ping %r from %r (rc=%d)", to.name, from_.name, rc)
         return False
+    return True
 
 
 @cli.command(help="Start dockers and test the LRP daemon")
@@ -192,7 +193,7 @@ def start(project_root=DEFAULT_PROJECT_ROOT, network_name=DEFAULT_NETWORK_NAME):
     # Start dockers & LRP daemons
     with DockerBasedWSN(topology.to_directed(), docker_network_name=network_name, project_root=project_root) as net:
         logger.info("Wait for the routing protocol's initialization…")
-        time.sleep(5)
+        time.sleep(10)
 
         # Test connectivity
         if not test_connectivity(from_=net._containers["lrp_6"][0], to=net._containers["lrp_1"][0]):
