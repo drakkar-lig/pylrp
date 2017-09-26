@@ -82,28 +82,30 @@ class DockerBasedWSN:
     def _ebtables_init(self):
         """Initialize the ebtables chain & rules."""
         logger.info("Create ebtables chain %r", self.ebtables_chain_name)
-        os.system("ebtables --new-chain %s" % self.ebtables_chain_name)
-        os.system("ebtables --policy %s DROP" % self.ebtables_chain_name)
+        subprocess.run(("ebtables --new-chain %s" % self.ebtables_chain_name).split())
+        subprocess.run(("ebtables --policy %s DROP" % self.ebtables_chain_name).split(), check=True)
 
     def _ebtables_clean(self):
         """Clean the ebtables chain & rules."""
         logger.info("Remove ebtables chain %r", self.ebtables_chain_name)
         for _, interface_name in self._containers.values():
-            os.system("ebtables --delete FORWARD --out-interface %(iface)s --jump %(chain)s" %
-                      dict(chain=self.ebtables_chain_name, iface=interface_name))
-        os.system("ebtables --delete-chain %s" % self.ebtables_chain_name)
+            subprocess.run(("ebtables --delete FORWARD --out-interface %(iface)s --jump %(chain)s" %
+                            dict(chain=self.ebtables_chain_name, iface=interface_name)).split())
+        subprocess.run(("ebtables --delete-chain %s" % self.ebtables_chain_name).split())
 
     def _ebtables_init_node(self, iface):
         """Set ebtables initial rule for this container."""
-        os.system("ebtables --append FORWARD --out-interface %(iface)s --jump %(chain)s" %
-                  dict(chain=self.ebtables_chain_name, iface=iface))
+        subprocess.run(("ebtables --append FORWARD --out-interface %(iface)s --jump %(chain)s" %
+                        dict(chain=self.ebtables_chain_name, iface=iface)).split(), check=True)
 
     def _ebtables_add_edge(self, from_if, to_if):
         """Allow from_if to send messages to to_if."""
-        os.system("ebtables --delete %(chain)s --out-interface %(from_if)s --in-interface %(to_if)s --jump ACCEPT" %
-                  dict(chain=self.ebtables_chain_name, from_if=from_if, to_if=to_if))
-        os.system("ebtables --insert %(chain)s --out-interface %(from_if)s --in-interface %(to_if)s --jump ACCEPT" %
-                  dict(chain=self.ebtables_chain_name, from_if=from_if, to_if=to_if))
+        subprocess.run(("ebtables --delete %(chain)s --out-interface %(from_if)s --in-interface %(to_if)s "
+                        "--jump ACCEPT" % dict(chain=self.ebtables_chain_name, from_if=from_if, to_if=to_if)).split(),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(("ebtables --insert %(chain)s --out-interface %(from_if)s --in-interface %(to_if)s "
+                        "--jump ACCEPT" % dict(chain=self.ebtables_chain_name, from_if=from_if, to_if=to_if)).split(),
+                       check=True)
 
     def _ebtables_drop_edge(self, from_if, to_if):
         """Disallow from_if to send messages to to_if."""
