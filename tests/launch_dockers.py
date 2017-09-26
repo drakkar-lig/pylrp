@@ -116,13 +116,13 @@ class DockerBasedWSN:
         # Compute the command for launching LRP
         command = "python -m lrp -vv daemon" + (" --metric 0 --sink" if is_sink else "")
         # Prepend the init script
-        command = "/root/pylrp/docker_image/init_lrp.sh -v --wait " + command
+        command = "/root/pylrp/tests/docker_image/init_lrp.sh -v --wait " + command
 
         logger.info("Start container %r%s", container_name, " as a sink" if is_sink else "")
         container = self._docker_client.containers.run(
             image=image, volumes=["%s:%s:ro" % (self.project_root, '/root/pylrp')],
-            working_dir="/root/pylrp/src", command=command, entrypoint="/root/pylrp/docker_image/init_lrp.sh",
             environment={'LANG': "fr_FR.UTF-8"}, network=self._network.name,
+            working_dir="/root/pylrp/src", command=command, entrypoint="/root/pylrp/tests/docker_image/init_lrp.sh",
             name=container_name, hostname=container_name, privileged=True, detach=True, remove=True)
 
         # Get the host-end of the veth container interface
@@ -180,7 +180,7 @@ def test_connectivity(from_, to, count=2):
 
 
 def build_image(dockerfile_path, tag=DEFAULT_IMAGE, **kwargs):
-    """"""
+    """Build a docker image"""
     client = docker.from_env()
     logger.info("Build image %r from %r" % (tag, dockerfile_path))
     client.images.build(path=dockerfile_path, tag=tag, **kwargs)
@@ -201,7 +201,7 @@ def start(project_root=DEFAULT_PROJECT_ROOT, network_name=DEFAULT_NETWORK_NAME):
     topology.add_node("lrp_1", is_sink=True)
 
     # Ensure the image is correctly built
-    build_image(os.path.join(project_root, "docker_image"))
+    build_image(os.path.join(DEFAULT_PROJECT_ROOT, "tests", "docker_image"))
 
     # Start dockers & LRP daemons
     with DockerBasedWSN(topology.to_directed(), docker_network_name=network_name, project_root=project_root) as net:
