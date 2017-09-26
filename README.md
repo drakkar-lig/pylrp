@@ -25,6 +25,7 @@ However, the core of the protocol is available through an independent python
 abstract class: `lrp.daemon.LrpProcess`. To make it compliant with another 
 platform, one should subclass it, as `lrp.linux_wrapper.LinuxLrpProcess` do.
 
+
 ### Configuration of linux system
 
 The host route packets through the interface from which the packet has come. 
@@ -42,20 +43,20 @@ not have a route at all), we must accept this kind of packets:
 
 ## Testing
 
-There is currently no automated tests.
+Tests are docker-based (so, obviously, docker is expected to be installed on
+this machine). A docker image is provided, and test can be run from a python
+script.
 
 
-### Start LRP in a docker container
+### The docker image
 
-
-#### Build the image
-It is possible to test the PyLRP implementation by using docker containers. 
-A Dockerfile is provided in `docker_image`. Just build it:
+A Dockerfile is provided in `tests/docker_image/`. Just build it:
 
     docker build -t "$IMAGE_NAME"
 
 
-#### Run the container
+### Run a container
+
 To run LRP with its own network stack, I use this command:
 
     docker run --network "$NETWORK_NAME" \
@@ -76,9 +77,14 @@ routing table / to ping other machines, use:
 
     docker exec -it "$CONTAINER_NAME" /bin/bash
 
+To get the logs of the daemon, use:
 
-#### Setting the network topology
-If you launch many containers (in the same network), you should be able to 
+    docker logs "$CONTAINER_NAME"
+
+
+### Setting the network topology
+
+If you launch many containers (in the same network), you should be able to
 route packets from a container to another. However, it won't be a real 
 multi-hop network, as all communications between containers are allowed.
 
@@ -89,14 +95,14 @@ To limit the connectivity between containers, use `ebtables`:
        ebtables -N "$NETWORK_NAME"
        ebtables -A FORWARD -i veth<xxxx> -j "$NETWORK_NAME"
    
-   (the second line is to be applied to each virtual-ethernet interface 
-   linked to the docker containers).
+   (the second line is to be applied to each host-side virtual-ethernet
+   interface linked to the docker containers).
    
 2. Drop all traffic reaching this table:
 
        ebtables -P "$NETWORK_NAME" DROP
 
-3. Allow traffic between some specific containers:
+3. Allow traffic between some specific containers (bidirectionnaly):
 
        ebtables -A "$NETWORK_NAME" -i veth<xxxx> -o veth<yyyy> -j ACCEPT
        ebtables -A "$NETWORK_NAME" -i veth<yyyy> -o veth<xxxx> -j ACCEPT
@@ -104,3 +110,12 @@ To limit the connectivity between containers, use `ebtables`:
 4. Optionally, allow the sink to communicate with the host:
    
        ebtables -A "$NETWORK_NAME" -i veth<sinkxx> -o br-<xxxx> -j ACCEPT
+
+
+### Automated testing
+
+All these steps above (build image, launch container & configure network
+topology) are implemented in python, in the `tests/launch_dockers.py` script.
+Launch it using:
+
+    python tests/launch_dockers.py start
