@@ -147,11 +147,6 @@ class DockerBasedWSN:
             logger.info("Container %r already stopped", container_name)
 
 
-@click.group()
-def cli():
-    pass
-
-
 def exec_with_rc(container: Container, cmd):
     """Execute command on a container and get its return code.
 
@@ -186,12 +181,21 @@ def build_image(dockerfile_path, tag=DEFAULT_IMAGE, **kwargs):
     client.images.build(path=dockerfile_path, tag=tag, **kwargs)
 
 
-@cli.command(help="Start dockers and test the LRP daemon")
-@click.option("--project-root", default=DEFAULT_PROJECT_ROOT, show_default=True,
-              help="Path to the project root.")
-@click.option("--network-name", default=DEFAULT_NETWORK_NAME, show_default=True,
-              help="Name of the docker network.")
-def start(project_root=DEFAULT_PROJECT_ROOT, network_name=DEFAULT_NETWORK_NAME):
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+@click.option("--interact/--no-interact", default=False, show_default=True,
+              help="Interact when the containers and the network are started.")
+def test(interact=False):
+    """Run some automated tests.
+
+    * Start the containers
+    * Configure the network
+    * Test connectivity between containers
+    * Stop all of them"""
     # Create network topology
     topology = networkx.Graph()
     topology.add_edges_from((("lrp_1", "lrp_2"),
@@ -204,15 +208,18 @@ def start(project_root=DEFAULT_PROJECT_ROOT, network_name=DEFAULT_NETWORK_NAME):
     build_image(os.path.join(DEFAULT_PROJECT_ROOT, "tests", "docker_image"))
 
     # Start dockers & LRP daemons
-    with DockerBasedWSN(topology.to_directed(), docker_network_name=network_name, project_root=project_root) as net:
+    with DockerBasedWSN(topology.to_directed(),
+                        docker_network_name=DEFAULT_NETWORK_NAME, project_root=DEFAULT_PROJECT_ROOT)\
+            as net:
         logger.info("Wait for the routing protocol's initialization…")
         time.sleep(10)
 
         # Test connectivity
-        if not test_connectivity(from_=net._containers["lrp_6"][0], to=net._containers["lrp_1"][0]):
-            logger.info("Fall back to an interactive console, to find what failed")
+        if interact:
             import code
             code.interact(local=locals())
+        else:
+            test_connectivity(from_=net._containers["lrp_6"][0], to=net._containers["lrp_1"][0])
 
 
 if __name__ == '__main__':

@@ -118,4 +118,4 @@ All these steps above (build image, launch container & configure network
 topology) are implemented in python, in the `tests/launch_dockers.py` script.
 Launch it using:
 
-    python tests/launch_dockers.py start
+    python tests/launch_dockers.py test
