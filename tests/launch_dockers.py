@@ -21,6 +21,7 @@ class DockerBasedWSN:
 
     The topology of the WSN is defined by a networkx.DiGraph. Nodes and edges
     are defined there."""
+
     def __init__(self, topology: networkx.DiGraph,
                  docker_network_name=None, ebtables_chain_name=None, project_root=DEFAULT_PROJECT_ROOT):
         super().__init__()
