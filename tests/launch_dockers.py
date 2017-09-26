@@ -178,6 +178,13 @@ def test_connectivity(from_, to, count=2):
     return True
 
 
+def build_image(dockerfile_path, tag=DEFAULT_IMAGE, **kwargs):
+    """"""
+    client = docker.from_env()
+    logger.info("Build image %r from %r" % (tag, dockerfile_path))
+    client.images.build(path=dockerfile_path, tag=tag, **kwargs)
+
+
 @cli.command(help="Start dockers and test the LRP daemon")
 @click.option("--project-root", default=DEFAULT_PROJECT_ROOT, show_default=True,
               help="Path to the project root.")
@@ -191,6 +198,9 @@ def start(project_root=DEFAULT_PROJECT_ROOT, network_name=DEFAULT_NETWORK_NAME):
                              ("lrp_3", "lrp_5"), ("lrp_3", "lrp_6"),
                              ("lrp_4", "lrp_6")))
     topology.add_node("lrp_1", is_sink=True)
+
+    # Ensure the image is correctly built
+    build_image(os.path.join(project_root, "docker_image"))
 
     # Start dockers & LRP daemons
     with DockerBasedWSN(topology.to_directed(), docker_network_name=network_name, project_root=project_root) as net:
