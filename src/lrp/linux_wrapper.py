@@ -10,6 +10,7 @@ from typing import Optional, List, Tuple, Dict
 import click
 import iptc
 import pyroute2
+from pyroute2.ipdb.main import IPDB
 from pyroute2.netlink.rtnl import ifinfmsg, rt_scope
 
 import lrp
@@ -157,7 +158,7 @@ class LinuxLrpProcess(LrpProcess):
 class NetlinkRoutingTable(RoutingTable):
     def __init__(self, lrp_process: LinuxLrpProcess):
         super().__init__()
-        self.ipr = pyroute2.IPRoute()
+        self.ipdb = IPDB()
         self.lrp_process = lrp_process
 
     def __enter__(self):
@@ -200,20 +201,24 @@ class NetlinkRoutingTable(RoutingTable):
             # Route does not exist, ok.
             pass
 
+        self.ipdb.release()
+
     def get_mac_from_ip(self, ip_address: Address):
         """Return the layer 2 address, given a layer 3 address. Return None if such
         address is unknown"""
+        table = self.ipdb.neighbours[self.lrp_process.interface_idx]
         try:
-            return self.ipr.neigh("dump", dst=str(ip_address))[0].get_attr('NDA_LLADDR').upper()
-        except IndexError:
+            return table[str(ip_address)]['lladdr'].upper()
+        except KeyError:
             # Unknown IP address
             return None
 
     def get_ip_from_mac(self, mac_address) -> Optional[Address]:
         """Return the layer 3 address, given a layer 2 address. Return None if such
         layer 2 address is unknown"""
+        table = self.ipdb.neighbours[self.lrp_process.interface_idx].raw.items()
         try:
-            return Address(self.ipr.neigh("dump", lladdr=mac_address.lower())[0].get_attr('NDA_DST'))
+            return [ip for ip, data in table if data['lladdr'] == mac_address.lower()][0]
         except IndexError:
             # Unknown MAC address
             return None
@@ -267,28 +272,47 @@ class NetlinkRoutingTable(RoutingTable):
                     self._nl_allow_destination(destination)
 
     def _nl_add_neighbor_route(self, destination: Address):
-        self.ipr.route("replace", dst=str(destination), oif=self.lrp_process.interface_idx,
-                       scope=rt_scope['link'], proto=lrp.conf['netlink']['proto_number'])
-        self.logger.info("Netlink route for neighbor %s updated", destination)
+        """Ensure netlink has a route towards the neighbor `destination`"""
+        try:
+            route = self.ipdb.routes[destination.as_subnet()]
+        except KeyError:
+            # Route does not exists. Will create it
+            pass
+        else:
+            # Route is found. Ensure it is a neighbor route
+            if route['scope'] == rt_scope['link']:
+                # All is correct, nothing to do
+                return
+
+        self.logger.info("Create netlink route towards neighbor %s", destination)
+        self.ipdb.routes.add({
+            'dst': destination.as_subnet(),
+            'oif': self.lrp_process.interface_idx,
+            'scope': rt_scope['link'],
+            'proto': lrp.conf['netlink']['proto_number']}).commit()
 
     def _nl_add_route(self, destination: Subnet, next_hops: Dict[Address, int]):
-        dst = str(destination) if destination != DEFAULT_ROUTE else "0.0.0.0/0"
-        multipath = [{'gateway': str(nh), 'hops': metric} for nh, metric in next_hops.items()]
-        self.ipr.route("replace", dst=dst, multipath=multipath, proto=lrp.conf['netlink']['proto_number'])
-        self.logger.info("Netlink route towards %s updated", destination)
+        self.logger.info("Update netlink route towards %s", destination)
+
+        # Drop previous route
+        try:
+            self.ipdb.routes[str(destination)].remove().commit()
+        except KeyError:
+            # No route, ok.
+            pass
+
+        self.ipdb.routes.add({
+            'dst': str(destination),
+            'multipath': [{'gateway': str(nh), 'hops': metric} for nh, metric in next_hops.items()],
+            'proto': lrp.conf['netlink']['proto_number']}).commit()
 
     def _nl_drop_route(self, destination):
         try:
-            dst = str(destination) if destination != DEFAULT_ROUTE else "0.0.0.0/0"
-            self.ipr.route("delete", dst=dst, scope=rt_scope['nowhere'])
-            self.logger.info("Netlink route towards %s deleted", destination)
-        except pyroute2.netlink.exceptions.NetlinkError as e:
-            if e.code == errno.ESRCH:  # No such process => "no such route" in netlink's logic.
-                # Route did not exist, ok.
-                pass
-            else:
-                # Unknown exception
-                raise
+            self.logger.info("Delete netlink route towards %s", destination)
+            self.ipdb.routes[str(destination)].remove().commit()
+        except KeyError:
+            # No such route, ok
+            pass
 
     def _nl_allow_predecessor(self, predecessor: Address):
         self._non_routables_table.refresh()
