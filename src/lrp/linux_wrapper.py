@@ -35,7 +35,7 @@ class LinuxLrpProcess(LrpProcess):
 
         super().__init__(**remaining_kwargs)
         self.routing_table = NetlinkRoutingTable(self)
-        self.non_routables_queue = netfilterqueue.NetfilterQueue()
+        self.la_queue = netfilterqueue.NetfilterQueue()
 
     def __enter__(self):
         # Initialize sockets
@@ -65,9 +65,9 @@ class LinuxLrpProcess(LrpProcess):
         # Initialize the routing table
         self.routing_table.__enter__()
 
-        # Initialize netfilter queue
+        # Initialize netfilter queue for loop-avoidance mechanism
         def queue_packet_handler(packet):
-            """Handle a non-routable and activate corresponding LRP mechanisms"""
+            """Handle a non-routable packet and activate corresponding LRP mechanisms"""
             payload = packet.get_payload()
             destination = socket.inet_ntoa(payload[16:20])
             if self.is_sink:
@@ -80,8 +80,7 @@ class LinuxLrpProcess(LrpProcess):
                     sender=Address(self.routing_table.get_ip_from_mac(sender)))
             packet.drop()
 
-        self.non_routables_queue.bind(lrp.conf['netlink']['netfilter_queue_nb'], queue_packet_handler)
-        # self.non_routables_queue.fileno = lambda: self.non_routables_queue.get_fd()
+        self.la_queue.bind(lrp.conf['netlink']['netfilter_queue_nb'], queue_packet_handler)
 
         # Initialize LRP itself
         return super().__enter__()
@@ -100,7 +99,7 @@ class LinuxLrpProcess(LrpProcess):
         self.unicast_socket.close()
 
         # Close netfilter-queue
-        self.non_routables_queue.unbind()
+        self.la_queue.unbind()
 
     @property
     def own_ip(self) -> Address:
@@ -121,7 +120,7 @@ class LinuxLrpProcess(LrpProcess):
         return prefix
 
     def wait_event(self):
-        queue_fd = self.non_routables_queue.get_fd()
+        queue_fd = self.la_queue.get_fd()
         while True:
             # Handle timers
             next_time_event = self.scheduler.run(blocking=False)
@@ -132,7 +131,7 @@ class LinuxLrpProcess(LrpProcess):
                 # Handle packet from socket or queue
                 readable = rr[0]
                 if readable == queue_fd:
-                    self.non_routables_queue.run(block=False)
+                    self.la_queue.run(block=False)
                 else:
                     data, (sender, _) = readable.recvfrom(16)
                     sender = Address(sender)
@@ -162,46 +161,47 @@ class NetlinkRoutingTable(RoutingTable):
         self.lrp_process = lrp_process
 
     def __enter__(self):
-        # Initialize netfilter
-        self._non_routables_table = iptc.Table(iptc.Table.FILTER)
-        self._non_routables_table.autocommit = False
-        self._non_routables_chain = iptc.Chain(self._non_routables_table, "FORWARD")
+        # Initialize loop-avoidance mechanism
+        self._la_table = iptc.Table(iptc.Table.FILTER)
+        self._la_table.autocommit = False
+        self._la_chain = self._la_table.create_chain(lrp.conf['netlink']['iptables_chain_name'])
 
+        # Redirect forwarded traffic to our management table
+        self._la_redirect_rule = iptc.Rule()
+        self._la_redirect_rule.create_target(lrp.conf['netlink']['iptables_chain_name'])
+        iptc.Chain(self._la_table, "FORWARD").append_rule(self._la_redirect_rule)
+
+        # Redirect dropped packets to the nfqueue
         self.logger.debug("Redirect non-routables towards netfilter-queue %d",
                           lrp.conf['netlink']['netfilter_queue_nb'])
-        self._non_routables_default_rule = iptc.Rule()
+        self._la_default_rule = iptc.Rule()
         if self.lrp_process.is_sink:
             # We are the sink: we expect to have a default route that does not
             # depend on the LRP network. Allow to use this route, except for
             # packets destined to the LRP network itself.
-            self._non_routables_default_rule.dst = str(self.lrp_process.network_prefix)
-        self._non_routables_default_rule.target = iptc.Target(self._non_routables_default_rule, "NFQUEUE")
-        self._non_routables_default_rule.target.queue_num = str(lrp.conf['netlink']['netfilter_queue_nb'])
-        self._non_routables_chain.append_rule(self._non_routables_default_rule)
-        self._non_routables_table.commit()
+            self._la_default_rule.dst = str(self.lrp_process.network_prefix)
+        self._la_default_rule.create_target("NFQUEUE")
+        self._la_default_rule.target.queue_num = str(lrp.conf['netlink']['netfilter_queue_nb'])
+        self._la_chain.append_rule(self._la_default_rule)
+
+        self._la_table.commit()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        old_neighbors = set(self.neighbors)
-        self.neighbors.clear()
-        old_destinations = set(self.routes.keys())
-        self.routes.clear()
-
-        for neighbor in old_neighbors:
-            self._nl_sync(Subnet(neighbor))
-            self._nl_disallow_predecessor(neighbor)
-
-        for destination in old_destinations - old_neighbors:
-            self._nl_sync(destination)
-
-        try:
-            self._non_routables_table.refresh()
-            self._non_routables_chain.delete_rule(self._non_routables_default_rule)
-            self._non_routables_table.commit()
-        except iptc.ip4tc.IPTCError:
-            # Route does not exist, ok.
-            pass
-
+        # Clean routing table: all routes inserted by the protocol LRP
+        for route in self.ipdb.routes:
+            if route['proto'] == lrp.conf['netlink']['proto_number']:
+                route.remove().commit()
         self.ipdb.release()
+
+        # Clean iptables (loop avoidance mechanism)
+        self._la_table.refresh()
+        iptc.Chain(self._la_table, "FORWARD").delete_rule(self._la_redirect_rule)
+        self._la_table.delete_chain(self._la_chain)
+        self._la_table.commit()
+
+        # Clean internal structures
+        self.neighbors.clear()
+        self.routes.clear()
 
     def get_mac_from_ip(self, ip_address: Address):
         """Return the layer 2 address, given a layer 3 address. Return None if such
@@ -315,10 +315,10 @@ class NetlinkRoutingTable(RoutingTable):
             pass
 
     def _nl_allow_predecessor(self, predecessor: Address):
-        self._non_routables_table.refresh()
+        self._la_table.refresh()
         predecessor_mac = self.get_mac_from_ip(predecessor)
         # Look for the rule allowing the predecessor
-        for rule in self._non_routables_chain.rules:
+        for rule in self._la_chain.rules:
             try:
                 if rule.matches[0].mac_source == predecessor_mac:
                     # Found
@@ -336,28 +336,28 @@ class NetlinkRoutingTable(RoutingTable):
             comment.comment = "allow from predecessor %s" % predecessor
             rule.add_match(comment)
             rule.target = iptc.Target(rule, "ACCEPT")
-            self._non_routables_chain.insert_rule(rule)
-            self._non_routables_table.commit()
+            self._la_chain.insert_rule(rule)
+            self._la_table.commit()
             self.logger.info("Traffic from %s is allowed", predecessor)
 
     def _nl_disallow_predecessor(self, predecessor: Address):
-        self._non_routables_table.refresh()
+        self._la_table.refresh()
         predecessor_mac = self.get_mac_from_ip(predecessor)
         # Look for the rule allowing the predecessor
-        for rule in self._non_routables_chain.rules:
+        for rule in self._la_chain.rules:
             try:
                 if rule.matches[0].mac_source == predecessor_mac:
                     # Found. Delete this rule
-                    self._non_routables_chain.delete_rule(rule)
-                    self._non_routables_table.commit()
+                    self._la_chain.delete_rule(rule)
+                    self._la_table.commit()
                     self.logger.info("Traffic from %s is no more allowed", predecessor)
             except IndexError:
                 # Not this rule
                 pass
 
     def _nl_allow_destination(self, destination: Subnet):
-        self._non_routables_table.refresh()
-        if not any(Subnet(rule.dst) == destination for rule in self._non_routables_chain.rules):
+        self._la_table.refresh()
+        if not any(Subnet(rule.dst) == destination for rule in self._la_chain.rules):
             # Destination was not known. Add rule.
             rule = iptc.Rule()
             rule.dst = str(destination)
@@ -365,20 +365,20 @@ class NetlinkRoutingTable(RoutingTable):
             comment.comment = "allow towards destination %s" % destination
             rule.add_match(comment)
             rule.target = iptc.Target(rule, "ACCEPT")
-            self._non_routables_chain.insert_rule(rule)
-            self._non_routables_table.commit()
+            self._la_chain.insert_rule(rule)
+            self._la_table.commit()
             self.logger.info("Traffic towards %s is allowed", destination)
 
     def _nl_disallow_destination(self, destination: Subnet):
-        self._non_routables_table.refresh()
+        self._la_table.refresh()
         try:
-            rule = [r for r in self._non_routables_chain.rules if Subnet(r.dst) == destination][0]
+            rule = [r for r in self._la_chain.rules if Subnet(r.dst) == destination][0]
         except IndexError:
             # Destination is not known by netfilter, ok.
             pass
         else:
-            self._non_routables_chain.delete_rule(rule)
-            self._non_routables_table.commit()
+            self._la_chain.delete_rule(rule)
+            self._la_table.commit()
             self.logger.info("Traffic towards %s is no more allowed", destination)
 
 
