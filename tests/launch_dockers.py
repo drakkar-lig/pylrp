@@ -118,12 +118,30 @@ class DockerBasedWSN:
         # Prepend the init script
         command = "/root/pylrp/tests/docker_image/init_lrp.sh -v --wait " + command
 
-        logger.info("Start container %r%s", container_name, " as a sink" if is_sink else "")
-        container = self._docker_client.containers.run(
-            image=image, volumes=["%s:%s:ro" % (self.project_root, '/root/pylrp')],
-            environment={'LANG': "fr_FR.UTF-8"}, network=self._network.name,
-            working_dir="/root/pylrp/src", command=command, entrypoint="/root/pylrp/tests/docker_image/init_lrp.sh",
-            name=container_name, hostname=container_name, privileged=True, detach=True, remove=True)
+        try:
+            container = self._docker_client.containers.run(
+                image=image, volumes=["%s:%s:ro" % (self.project_root, '/root/pylrp')],
+                environment={'LANG': "fr_FR.UTF-8"}, network=self._network.name,
+                working_dir="/root/pylrp/src", command=command, entrypoint="/root/pylrp/tests/docker_image/init_lrp.sh",
+                name=container_name, hostname=container_name, privileged=True, detach=True, remove=True)
+            logger.info("Container %r created%s", container_name, " as a sink" if is_sink else "")
+        except docker.errors.APIError as e:
+            if e.status_code == 409:  # Conflict
+                # Try to use the container if it is already created
+                try:
+                    container = self._docker_client.containers.get(container_name)
+                    if container.status not in ('created', 'exited'):
+                        raise Exception("Not handled stat %r for the container %r" %
+                                        (container.status, container_name))
+                except docker.errors.NotFound:
+                    # No such container
+                    raise Exception("Unable to create nor get the container %r" % container_name, e)
+                else:
+                    # Starting the container
+                    container.start()
+                    logger.info("Container %r restarted", container_name)
+            else:
+                raise
 
         # Get the host-end of the veth container interface
         interface_id = int(container.exec_run('cat /sys/class/net/eth0/iflink').decode('ascii'))
