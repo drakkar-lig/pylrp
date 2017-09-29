@@ -106,17 +106,33 @@ class RoutingTable:
         """Add a route to `destination`, through `next_hop`, with cost `metric`. If a
         route with the same destination/next_hop already exists, it is erased
         by the new one. If a route with the same destination but with another
-        next_hop exists, they coexists, with their own metric. If `destination`
-        is None, it is the default route."""
+        next_hop exists, they coexists, with their own metric.
+
+        :return True if the route has been inserted in the routing table.
+          False if the route was too bad and has not been inserted."""
         try:
             next_hops = self.routes[destination]
         except KeyError:
             # Destination was unknown
             next_hops = self.routes[destination] = {next_hop: metric}
+            self.logger.info("Update routing table: new route towards %r through %r[%d]",
+                             str(destination), str(next_hop), metric)
         else:
-            next_hops[next_hop] = metric
-        self.logger.info("Update routing table: next hops for %s are {%s}",
-                         destination, ", ".join(map(str, next_hops)))
+            try:
+                known_metric = next_hops[next_hop]
+            except KeyError:
+                self.logger.info("Update routing table: update route towards %r, also through %r[%d]",
+                                 str(destination), str(next_hop), metric)
+                next_hops[next_hop] = metric
+            else:
+                if known_metric <= metric:
+                    self.logger.info("Refusing new route: bad metric")
+                    return False
+                else:
+                    self.logger.info("Update routing table: refresh route towards %r through %r[%d]",
+                                     str(destination), str(next_hop), metric)
+                    next_hops[next_hop] = metric
+        return True
 
     def del_route(self, destination: Subnet, next_hop: Address):
         """Delete the route to `destination`, through `next_hop`. If a route with the

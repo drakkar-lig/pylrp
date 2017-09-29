@@ -225,95 +225,135 @@ class NetlinkRoutingTable(RoutingTable):
             return None
 
     def add_route(self, destination: Subnet, next_hop: Address, metric: int):
-        super().add_route(destination, next_hop, metric)
-        self._nl_sync(destination)
-        if destination != DEFAULT_ROUTE:
-            self._nl_allow_predecessor(next_hop)
+        inserted = super().add_route(destination, next_hop, metric)
+
+        if inserted:
+            # Add the next hop to the netlink route
+            try:
+                route = self.ipdb.routes[str(destination)]
+            except KeyError:
+                # Destination was unknown
+                self.logger.info("Update rtnetlink: new route towards %r through %r",
+                                 str(destination), str(next_hop))
+                self.ipdb.routes.add({
+                    'dst': str(destination),
+                    'multipath': [{'gateway': str(next_hop)}],
+                    'proto': lrp.conf['netlink']['proto_number']}).commit()
+                self._nl_allow_destination(destination)
+            else:
+                # Be sure this is not a neighbor route
+                if route['scope'] == rt_scope['link']:
+                    self.logger.info("Refuse host route: would erase a neighbor route")
+                else:
+                    already_known = (
+                        not route['multipath'] and route['gateway'] == str(next_hop) or
+                        route['multipath'] and any(p['gateway'] == str(next_hop)
+                                                   for p in route['multipath']))
+                    if already_known:
+                        self.logger.info("rtnetlink already knows %r as next hop towards %r",
+                                         str(next_hop), str(destination))
+                    else:
+                        self.logger.info("Update rtnetlink: update route towards %r, also through %r",
+                                         str(destination), str(next_hop))
+                        route.add_nh({'gateway': str(next_hop)}).commit()
+
+            if destination != DEFAULT_ROUTE:
+                self._nl_allow_predecessor(next_hop)
+
+        return inserted
 
     def del_route(self, destination: Subnet, next_hop: Address):
         super().del_route(destination, next_hop)
-        self._nl_sync(destination)
+
+        # Delete the next hop from the netlink route
+        try:
+            route = self.ipdb.routes[str(destination)]
+        except KeyError:
+            # No route at all, OK
+            pass
+        else:
+            # Be sure this is not a neighbor route
+            if route['scope'] != rt_scope['link']:
+                self.logger.info("Remove netlink route towards %r through %r",
+                                 str(destination), str(next_hop))
+                try:
+                    route.del_nh({'gateway': str(next_hop)}).commit()
+                except KeyError:  # 'attempt to delete nexthop from non-multipath route': no more next hop
+                    route.remove().commit()
+                    self.logger.info("No more rtnetlink route towards %r",
+                                     str(destination))
+                    self._nl_disallow_destination(destination)
+
         if not self.is_predecessor(next_hop):
             self._nl_disallow_predecessor(next_hop)
 
     def filter_out_nexthops(self, destination: Subnet, max_metric: int = None) -> List[Tuple[Address, int]]:
         dropped_nhs = super().filter_out_nexthops(destination, max_metric)
-        for nh, _ in dropped_nhs:
-            if not self.is_predecessor(nh):
-                self._nl_disallow_predecessor(nh)
+
+        # Delete the dropped next hops from the netlink route
+        try:
+            route = self.ipdb.routes[str(destination)]
+        except KeyError:
+            # No route at all, OK
+            pass
+        else:
+            # Be sure this is not a neighbor route
+            if route['scope'] != rt_scope['link']:
+                for nh, _ in dropped_nhs:
+                    self.logger.info("Remove netlink route towards %r through %r",
+                                     str(destination), str(nh))
+                    try:
+                        route.del_nh({'gateway': str(nh)}).commit()
+                    except KeyError:  # 'attempt to delete nexthop from non-multipath route': no more next hop
+                        route.remove().commit()
+                        self.logger.info("No more rtnetlink route towards %r",
+                                         str(destination))
+                        self._nl_disallow_destination(destination)
+
+                    if not self.is_predecessor(nh):
+                        self._nl_disallow_predecessor(nh)
+
         return dropped_nhs
 
     def ensure_is_neighbor(self, neighbor: Address):
-        was_already_neighbor = neighbor in self.neighbors
         super().ensure_is_neighbor(neighbor)
-        if not was_already_neighbor:
-            self._nl_sync(Subnet(neighbor))
 
-    def _nl_sync(self, destination: Subnet):
-        """Must be called whenever self.routes[destination] has changed, even
-        if this entry has been dropped. Keep netlink synchronized with this
-        change. If next_hop is given, """
-
-        if destination.prefix == 32 and Address(destination) in self.neighbors:
-            # Recorded as neighbor in local table
-            self._nl_add_neighbor_route(destination)
-            self._nl_allow_destination(destination)
-        else:
-            try:
-                daemon_next_hops = self.routes[destination]
-            except KeyError:
-                # Route has been dropped. Just drop it, whatever is its state in netlink
-                self._nl_drop_route(destination)
-                self._nl_disallow_destination(destination)
-
-            else:
-                # Build the multipath host route
-                self._nl_add_route(destination, daemon_next_hops)
-                if destination != DEFAULT_ROUTE:
-                    self._nl_allow_destination(destination)
-
-    def _nl_add_neighbor_route(self, destination: Address):
-        """Ensure netlink has a route towards the neighbor `destination`"""
+        # Check netlink's state
         try:
-            route = self.ipdb.routes[destination.as_subnet()]
+            route = self.ipdb.routes[neighbor.as_subnet()]
         except KeyError:
             # Route does not exists. Will create it
             pass
         else:
             # Route is found. Ensure it is a neighbor route
             if route['scope'] == rt_scope['link']:
-                # All is correct, nothing to do
+                # All is correct, nothing more to do
                 return
+            else:
+                self.logger.info("Remove rtnetlink host route towards %r", str(neighbor))
+                route.remove().commit()
 
-        self.logger.info("Create netlink route towards neighbor %s", destination)
+        self.logger.info("Create rtnetlink route towards neighbor %r", str(neighbor))
         self.ipdb.routes.add({
-            'dst': destination.as_subnet(),
+            'dst': neighbor.as_subnet(),
             'oif': self.lrp_process.interface_idx,
             'scope': rt_scope['link'],
             'proto': lrp.conf['netlink']['proto_number']}).commit()
 
-    def _nl_add_route(self, destination: Subnet, next_hops: Dict[Address, int]):
-        self.logger.info("Update netlink route towards %s", destination)
+        self._nl_allow_destination(Subnet(neighbor))
 
-        # Drop previous route
+    def no_more_neighbor(self, neighbor: Address):
+        # Check netlink's state
         try:
-            self.ipdb.routes[str(destination)].remove().commit()
+            route = self.ipdb.routes[neighbor.as_subnet()]
         except KeyError:
-            # No route, ok.
+            # No route towards this neighbor, ok.
             pass
-
-        self.ipdb.routes.add({
-            'dst': str(destination),
-            'multipath': [{'gateway': str(nh), 'hops': metric} for nh, metric in next_hops.items()],
-            'proto': lrp.conf['netlink']['proto_number']}).commit()
-
-    def _nl_drop_route(self, destination):
-        try:
-            self.logger.info("Delete netlink route towards %s", destination)
-            self.ipdb.routes[str(destination)].remove().commit()
-        except KeyError:
-            # No such route, ok
-            pass
+        else:
+            # Ensure this is really a neighbor route, not a host route
+            if route['scope'] == rt_scope['link']:
+                self.logger.info("Remove rtnetlink neighbor route towards %r", str(neighbor))
+                route.remove().commit()
 
     def _nl_allow_predecessor(self, predecessor: Address):
         self._la_table.refresh()
