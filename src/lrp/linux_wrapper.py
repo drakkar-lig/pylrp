@@ -193,9 +193,10 @@ class NetlinkRoutingTable(RoutingTable):
                 route.remove().commit()
         self.ipdb.release()
 
-        # Clean iptables (loop avoidance mechanism)
+        self.logger.info("Cleaning iptables (loop avoidance mechanism)")
         self._la_table.refresh()
         iptc.Chain(self._la_table, "FORWARD").delete_rule(self._la_redirect_rule)
+        self._la_chain.flush()
         self._la_table.delete_chain(self._la_chain)
         self._la_table.commit()
 
