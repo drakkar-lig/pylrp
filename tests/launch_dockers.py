@@ -6,7 +6,7 @@ import subprocess
 import time
 
 import click
-import docker
+import docker, docker.errors
 import networkx
 from docker.models.containers import Container
 
@@ -184,19 +184,33 @@ def exec_with_rc(container: Container, cmd):
     return response['ExitCode']
 
 
-def test_connectivity(from_, to, count=2):
-    rc = exec_with_rc(from_, ["ping", "-c", str(count), to.name])
-    if rc != 0:
-        logger.error("Unable to ping %r from %r (rc=%d)", to.name, from_.name, rc)
-        return False
-    return True
-
-
 def build_image(dockerfile_path, tag=DEFAULT_IMAGE, **kwargs):
     """Build a docker image"""
     client = docker.from_env()
     logger.info("Build image %r from %r" % (tag, dockerfile_path))
     client.images.build(path=dockerfile_path, tag=tag, **kwargs)
+
+
+def connectivity_matrix(nodes: list, ping_count=2):
+    """Test connectivity between all nodes.
+
+    :param nodes: the set of container names that should be tested
+    :param ping_count: the number of ping probes to send"""
+    client = docker.from_env()
+    print(" " * 5 + "".join(" {:^5}".format(n) for n in nodes))
+    for from_node in nodes:
+        if not isinstance(from_node, Container):
+            from_node = client.containers.get(from_node)
+        print("{:^5}".format(from_node.name), end="")
+        for to_node in nodes:
+            if from_node.name == to_node:
+                print(" " * (5 + 1), end="")
+            else:
+                if isinstance(to_node, Container):
+                    to_node = to_node.name
+                ok = exec_with_rc(from_node, ["ping", "-c", str(ping_count), to_node]) == 0
+                print(" {:^5}".format("✔" if ok else "✗"), end="", flush=True)
+        print()
 
 
 @click.group()
@@ -207,7 +221,9 @@ def cli():
 @cli.command()
 @click.option("--interact/--no-interact", default=False, show_default=True,
               help="Interact when the containers and the network are started.")
-def test(interact=False):
+@click.option("--test-connectivity/--no-test-connectivity", default=True, show_default=True,
+              help="Test connectivity between nodes when the containers and the network are started")
+def test(interact=False, test_connectivity=True):
     """Run some automated tests.
 
     * Start the containers
@@ -227,17 +243,20 @@ def test(interact=False):
 
     # Start dockers & LRP daemons
     with DockerBasedWSN(topology.to_directed(),
-                        docker_network_name=DEFAULT_NETWORK_NAME, project_root=DEFAULT_PROJECT_ROOT)\
-            as net:
+                        docker_network_name=DEFAULT_NETWORK_NAME,
+                        project_root=DEFAULT_PROJECT_ROOT) as net:
         logger.info("Wait for the routing protocol's initialization…")
         time.sleep(10)
 
-        # Test connectivity
+        if test_connectivity:
+            connectivity_matrix(topology.nodes())
+
         if interact:
             import code
-            code.interact(local=locals())
-        else:
-            test_connectivity(from_=net._containers["lrp_6"][0], to=net._containers["lrp_1"][0])
+            vars = dict(locals())
+            vars.update(globals())
+            code.interact(local=vars)
+            pass
 
 
 if __name__ == '__main__':
