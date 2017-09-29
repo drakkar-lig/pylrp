@@ -144,10 +144,15 @@ class RoutingTable:
             # Unknown destination, no such next_hop, ok.
             pass
         else:
-            del next_hops[next_hop]
-            if len(next_hops) == 0:
-                # No more next hops for this route
-                del self.routes[destination]
+            try:
+                del next_hops[next_hop]
+            except KeyError:
+                # Was not a next hop, ok.
+                pass
+            else:
+                if len(next_hops) == 0:
+                    # No more next hops for this route
+                    del self.routes[destination]
 
     def filter_out_nexthops(self, destination: Subnet, max_metric: int = None) -> List[Tuple[Address, int]]:
         """Filter out some next hops, according to some constraints. Returns the list

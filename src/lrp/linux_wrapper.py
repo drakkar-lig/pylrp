@@ -293,8 +293,22 @@ class NetlinkRoutingTable(RoutingTable):
         else:
             # Ensure this is really a neighbor route, not a host route
             if route['scope'] == rt_scope['link']:
+                # Drop this neighbor from others host routes
+                for destination in self.routes.keys():
+                    self.del_route(destination, neighbor)
+
                 self.logger.info("Remove rtnetlink neighbor route towards %r", str(neighbor))
                 route.remove().commit()
+
+                # Fallback to a host route towards it, if we have one
+                try:
+                    next_hops = self.routes[neighbor.as_subnet()]
+                except KeyError:
+                    # No such host route. Just disallow its traffic through us
+                    self._nl_disallow_destination(neighbor.as_subnet())
+                else:
+                    for nh, metric in next_hops.items():
+                        self.add_route(neighbor.as_subnet(), nh, metric)
 
     def _nl_allow_predecessor(self, predecessor: Address):
         self._la_table.refresh()
