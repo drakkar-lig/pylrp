@@ -74,7 +74,9 @@ class LinuxLrpProcess(LrpProcess):
             else:
                 source = socket.inet_ntoa(payload[12:16])
                 sender = ":".join(["%02x" % b for b in packet.get_hw()[0:6]])
-                self.handle_non_routable_packet(source, destination, self.routing_table.get_ip_from_mac(sender))
+                self.handle_non_routable_packet(
+                    source=Address(source), destination=Address(destination),
+                    sender=Address(self.routing_table.get_ip_from_mac(sender)))
             packet.drop()
 
         self.non_routables_queue.bind(lrp.conf['netlink']['netfilter_queue_nb'], queue_packet_handler)
